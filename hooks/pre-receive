@@ -1,0 +1,33 @@
+#!/bin/sh
+
+url=$(git config --get infohub.validateUrl)
+if [ -z "$url" ]; then
+  echo "未配置 infohub.validateUrl，推送被拒绝" >&2
+  exit 1
+fi
+
+while read -r old new ref; do
+  if [ "$ref" = "refs/heads/infohub-status" ]; then
+    echo "infohub-status 由服务器维护，不接受客户端写入" >&2
+    exit 1
+  fi
+  if [ "$ref" != "refs/heads/main" ]; then
+    continue
+  fi
+
+  if [ -z "$(echo "$new" | tr -d '0')" ]; then
+    continue
+  fi
+
+  if [ -z "$(echo "$old" | tr -d '0')" ]; then
+    file_list=$(git -c core.quotepath=off ls-tree -r --name-only "$new")
+  else
+    file_list=$(git -c core.quotepath=off diff --name-only "$old" "$new")
+  fi
+
+  if ! resp=$(git archive --format=tar --add-virtual-file=".infohub-changed:$file_list" "$new" | curl -sS --fail-with-body --data-binary @- -H 'Content-Type: application/x-tar' "$url" 2>&1); then
+    echo "$resp" >&2
+    echo "InfoHub 校验未通过，推送被拒绝；本地运行 infohub check <文件> 查看" >&2
+    exit 1
+  fi
+done
