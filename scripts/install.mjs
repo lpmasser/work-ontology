@@ -25,6 +25,8 @@ const RESIDENT_TARGETS = [
   '.gemini/GEMINI.md', '.dsh/AGENTS.md', '.pi/agent/AGENTS.md', '.zcode/AGENTS.md'
 ];
 const RESIDENT_HEADING = '\n## 常驻指令\n';
+const RESIDENT_BEGIN = '<!-- infohub:begin';
+const RESIDENT_END = '<!-- infohub:end -->';
 
 export function renderResident(markdown, root) {
   markdown = markdown.replaceAll('\r\n', '\n');
@@ -33,8 +35,16 @@ export function renderResident(markdown, root) {
   const bodyStart = start + RESIDENT_HEADING.length;
   const end = markdown.indexOf('\n## ', bodyStart);
   const body = markdown.slice(bodyStart, end < 0 ? undefined : end).trim();
-  return '<!-- 由 work-ontology 的 scripts/install.mjs 从 InfoHub《InfoHub使用入口》生成；要修改请改 InfoHub 原文后重新运行安装 -->\n\n'
-    + body.replaceAll('{{INFOHUB_ROOT}}', root).replace(/^### /gm, '# ') + '\n';
+  return RESIDENT_BEGIN + ' 本段由 work-ontology 的 scripts/install.mjs 从 InfoHub《InfoHub使用入口》生成，要修改请改 InfoHub 原文后重新运行安装；标记之外的内容安装时保留 -->\n\n'
+    + body.replaceAll('{{INFOHUB_ROOT}}', root).replace(/^### /gm, '# ') + '\n\n' + RESIDENT_END + '\n';
+}
+
+// 只替换标记之间的生成段，标记外手写的内容保留；没有标记的旧文件整份都是旧版生成的，直接覆盖。
+export function mergeResident(existing, block) {
+  const start = existing.indexOf(RESIDENT_BEGIN);
+  const end = existing.indexOf(RESIDENT_END, start);
+  if (start < 0 || end < 0) return block;
+  return existing.slice(0, start) + block.trimEnd() + existing.slice(end + RESIDENT_END.length);
 }
 
 // 只写本机已安装的 harness（其配置目录存在），不为没装的 harness 建目录。
@@ -46,7 +56,8 @@ async function writeResident(root, userHome) {
       console.log(`未安装，跳过常驻指令: ${target}`);
       continue;
     }
-    await writeFile(target, text, 'utf8');
+    const existing = existsSync(target) ? await readFile(target, 'utf8') : '';
+    await writeFile(target, mergeResident(existing, text), 'utf8');
     console.log(`已写入常驻指令: ${target}`);
   }
 }

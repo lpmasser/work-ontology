@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { renderResident } from './install.mjs';
+import { renderResident, mergeResident } from './install.mjs';
 import { commandLocation } from './install-command.mjs';
 import { npm } from './npm.mjs';
 
@@ -34,11 +34,20 @@ title: "InfoHub使用入口"
 
 test('renderResident 只取常驻指令一节，替换路径并把三级标题提成一级', () => {
   const out = renderResident(ENTRY, '/data/InfoHub');
-  assert.match(out, /^<!-- 由 work-ontology/);
+  assert.match(out, /^<!-- infohub:begin .*work-ontology/);
+  assert.match(out, /<!-- infohub:end -->\n$/);
   assert.match(out, /\n# InfoHub\n/);
   assert.match(out, /\n# Agent 协作\n/);
   assert.match(out, /`\/data\/InfoHub` 是上下文层/);
   assert.doesNotMatch(out, /维护与接入|不应出现|\{\{INFOHUB_ROOT\}\}/);
+});
+
+test('mergeResident 只替换生成段，保留标记外手写的内容', () => {
+  const block = renderResident(ENTRY, '/new');
+  const old = '手写前言\n\n' + renderResident(ENTRY, '/old') + '\n# 手写补充\n';
+  const out = mergeResident(old, block);
+  assert.equal(out, '手写前言\n\n' + block + '\n# 手写补充\n');
+  assert.equal(mergeResident('旧版整份生成\n', block), block);
 });
 
 test('renderResident 缺少常驻指令一节时报错', () => {
