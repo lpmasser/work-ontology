@@ -101,10 +101,7 @@ async function handleBrief(vault, target, root) {
   pushWithUseWhen('适用规范', relatedOfType('standard'));
   pushWithUseWhen('工作方法', relatedOfType('method'));
 
-  // 相关知识：标题即结论，按与规范、方法相同的相关规则列出，让 Agent 开工时知道有哪些现成判断
-  const knowledge = relatedOfType('knowledge');
-  output.push('\n相关知识:');
-  output.push(...(knowledge.length ? knowledge.map(k => `${k.title} — ${k.path}`) : ['无']));
+  // 知识按项目归属几乎全部命中，列进开工说明只会淹没上面两节；要查现成判断用 find --type knowledge
 
   const workItems = filterObjects(vault, { projectId }).filter(isUnfinishedWork);
 

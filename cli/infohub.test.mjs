@@ -211,7 +211,7 @@ async function runCli(argv, envHome = null) {
   }
 }
 
-test('brief outputs all 5 sections with correct filtering rules', async () => {
+test('brief outputs all 4 sections with correct filtering rules', async () => {
   const root = await createFixture();
   try {
     // 1. 通过 ID 精确匹配
@@ -234,10 +234,9 @@ test('brief outputs all 5 sections with correct filtering rules', async () => {
     assert.ok(res.stdout.includes('新增接口 [待澄清/未开始] — docs/work2.md'));
     assert.ok(!res.stdout.includes('废弃特性'));
 
-    // 相关知识: k-1 (applies_to 指向项目 1 的 cap-1)，不含与项目 1 无关的 k-2
-    assert.ok(res.stdout.includes('相关知识:'));
-    assert.ok(res.stdout.includes('校验要放在高成本之前 — docs/k1.md'));
-    assert.ok(!res.stdout.includes('无关知识'));
+    // 知识不进开工说明：要查现成判断用 find --type knowledge
+    assert.ok(!res.stdout.includes('相关知识:'));
+    assert.ok(!res.stdout.includes('校验要放在高成本之前'));
 
     // ⑤ 需关注: cap-1 (attention: 注意内存泄露)
     assert.ok(res.stdout.includes('核心计算能力：注意内存泄露 — docs/cap1.md'));

@@ -27,9 +27,27 @@ test('action items prioritize explicit attention, pending decisions, then stale 
   assert.equal(result.version, 3);
   assert.deepEqual(result.needsAction.map(item => [item.object.id, item.category]), [
     ['attention-old', '卡住了'], ['overlap', '卡住了'], ['done-with-attention', '卡住了'],
-    ['decision-old', '等我拍板'], ['decision-new', '等我拍板'], ['stale', '卡住了'],
+    ['decision-old', '等我拍板'], ['decision-new', '等我拍板'], ['stale', '停滞'],
   ]);
   assert.equal(result.needsAction.find(item => item.object.id === 'overlap').reason, '等待外部决定');
+});
+
+test('archived objects never need action, whatever their attention or progress says', () => {
+  const archived = (id, frontmatter) => {
+    const item = work(id, frontmatter);
+    item.path = `工作/archive/${id}.md`;
+    return item;
+  };
+  const note = object('archived-note', 'material', { updated: '2026-10-01', attention: '内容失效' });
+  note.path = '附属资料/archive/note.md';
+  const result = overview([
+    archived('archived-stale', { updated: '2026-01-01' }),
+    archived('archived-attention', { progress: '已交付', updated: '2026-10-25', attention: '发包标识待确定' }),
+    archived('archived-decision', { requirement: '待澄清', updated: '2026-01-01' }),
+    note,
+    work('live-stale', { updated: '2026-10-01' }),
+  ]);
+  assert.deepEqual(result.needsAction.map(item => item.object.id), ['live-stale']);
 });
 
 test('calendar-day boundaries exclude exactly seven stale days and include delivered work through fourteen days', () => {
@@ -46,6 +64,7 @@ test('calendar-day boundaries exclude exactly seven stale days and include deliv
     object('not-work', 'record', { progress: '已交付', project_id: 'p', updated: '2026-10-26' }),
   ]);
   assert.deepEqual(result.needsAction.map(item => item.object.id), ['eight']);
+  assert.equal(result.needsAction[0].category, '停滞');
   const project = result.projects.find(item => item.id === 'p');
   assert.equal(project.ongoingCount, 6);
   assert.deepEqual(project.work.map(item => item.id), ['eight', 'seven', 'not-started', 'missing', 'invalid', 'future']);

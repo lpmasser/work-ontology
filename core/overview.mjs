@@ -11,6 +11,10 @@ function dateNumber(value) {
   return timestamp / DAY_MS;
 }
 
+function isArchived(path) {
+  return path.split('/').includes('archive');
+}
+
 function byUpdated(a, b) {
   const first = dateNumber(a.frontmatter.updated) ?? Infinity;
   const second = dateNumber(b.frontmatter.updated) ?? Infinity;
@@ -32,13 +36,14 @@ export function buildOverview(index, now = new Date()) {
     const unfinished = isUnfinishedWork(object);
     const awaitingDecision = unfinished && fm.requirement === '待澄清';
     const stale = unfinished && fm.progress === '实施中' && age !== null && age > STALE_AFTER_DAYS;
-    if (fm.attention || awaitingDecision || stale) {
+    // 归档对象已收口，不再作为待处理项
+    if ((fm.attention || awaitingDecision || stale) && !isArchived(object.path)) {
       const attention = fm.attention ? [...fm.attention] : null;
       actions.push({
         priority: attention ? 0 : awaitingDecision ? 1 : 2,
         item: {
           object,
-          category: attention || !awaitingDecision ? '卡住了' : '等我拍板',
+          category: attention ? '卡住了' : awaitingDecision ? '等我拍板' : '停滞',
           reason: attention
             ? attention.slice(0, 50).join('') + (attention.length > 50 ? '…' : '')
             : awaitingDecision ? '等你拍板：需求待澄清' : `实施中，${age} 天未更新`,
