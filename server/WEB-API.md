@@ -279,6 +279,6 @@ passwordHash 用 `hashPassword`（`server/web-auth.mjs`）生成，Node scrypt �
 
 identity 可选，不配置时保留原有系统用户名、主机名及持久副本 UUID 行为。配置后 user 用于草稿/自动提交作者，`user@machine` 用于提交说明和来源；不改 Git main 规则、草稿、校验或推送流程。workspaceLock 是服务器副本显式选项，不改变本地默认路径。Web 启动要求此项为 true。
 
-同一副本的 Web 和同步需使用相同的绝对挂载路径、共享 PID namespace（分容器时 `pid: host`），让 PID lease 和 `sync status.running` 有真实含义。共享锁覆盖 Web 的核对版本与原子落盘、同步快进、自动提交；不覆盖不遵守该锁的外部编辑器/Agent。服务器用户副本只由 Web 和配套同步写入；本地 Agent 继续使用各自本地 clone。
+Web 与同步需使用相同的绝对挂载路径和共享 PID namespace（例如 Web 使用 Compose `pid: service:sync` 加入同步容器），让 PID lease 和 `sync status.running` 有真实含义。独立 namespace 也避免其他服务的 Git 进程因权限不足让本副本保守暂停。共享锁覆盖 Web 的核对版本与原子落盘、同步快进、自动提交；不覆盖不遵守该锁的外部编辑器/Agent。服务器用户副本只由 Web 和配套同步写入；本地 Agent 继续使用各自本地 clone。
 
 Web 默认监听 3000；通过反代提供 HTTPS，只在宿主机 loopback 映射应用端口。读写 JSON 请求最长 30 秒；Git 来源读取最长 15 秒、单次输出上限 64 MiB；工作区写锁最多等 5 秒后返回 503。生产新建/修改/冲突测试必须在临时仓库执行，防止闲置自动提交测试内容。
