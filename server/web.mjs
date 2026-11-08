@@ -10,6 +10,7 @@ import { status } from '../sync/command.mjs';
 import { Sessions, validHash } from './web-auth.mjs';
 import { Files, HttpError, etag, contentType, safePath } from './web-files.mjs';
 import { WorkspaceEvents } from './web-events.mjs';
+import { serveStatic } from './web-static.mjs';
 
 const MAX_BODY = 32 * 1024 * 1024;
 const VERSION = /^"sha256-[a-f0-9]{64}"$/;
@@ -52,7 +53,7 @@ function treeEntries(files) {
   return [...dirs].map(path => ({ path, type: 'directory' })).concat(files.map(f => ({ ...f, type: 'file' }))).sort((a, b) => a.path.localeCompare(b.path));
 }
 
-export async function createWebServer(config, { eventIntervalMs = 1000 } = {}) {
+export async function createWebServer(config, { eventIntervalMs = 30000 } = {}) {
   if (config.version !== 1 || !Array.isArray(config.users) || !config.users.length) throw new Error('Web 配置需要 version: 1 和非空 users');
   const origin = new URL(config.origin).origin;
   if (origin !== config.origin || !['https:', 'http:'].includes(new URL(origin).protocol)) throw new Error('origin 必须是完整且不带路径的 HTTP(S) 来源');
@@ -66,6 +67,12 @@ export async function createWebServer(config, { eventIntervalMs = 1000 } = {}) {
     const syncConfig = JSON.parse(await readFile(path.join(workspace, '.git/infohub-sync/config.json'), 'utf8'));
     if (syncConfig.workspaceLock !== true) throw new Error('Web 工作区必须先配置 workspaceLock: true');
     roots.add(workspace); names.add(entry.username); users.push({ ...entry, workspace });
+  }
+  let staticDir;
+  if (config.staticDir !== undefined) {
+    if (typeof config.staticDir !== 'string' || !path.isAbsolute(config.staticDir)) throw new Error('staticDir 必须是绝对目录路径');
+    staticDir = await realpath(config.staticDir);
+    if (!(await stat(staticDir)).isDirectory() || [...roots].some(root => root === staticDir || root.startsWith(staticDir + path.sep) || staticDir.startsWith(root + path.sep))) throw new Error('静态目录必须独立于所有用户工作区');
   }
   const sessions = new Sessions(users, { ttlSeconds: config.sessionTtlSeconds, secure: origin.startsWith('https:') });
   const workspaces = new Map();
@@ -82,11 +89,13 @@ export async function createWebServer(config, { eventIntervalMs = 1000 } = {}) {
     try {
       const url = new URL(req.url, origin), route = url.pathname;
       if (req.method === 'GET' && route === '/health') { send(res, 200, { ok: true }); return; }
+      const isAPI = route === '/api' || route.startsWith('/api/');
+      if (req.method === 'GET' && !isAPI && staticDir) { await serveStatic(staticDir, route, req, res); return; }
       if (req.method === 'GET' && route === '/') {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'" });
         res.end('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>InfoHub</title><h1>InfoHub</h1><p>Web API 已部署。网页界面将在批次 2 接入。</p>'); return;
       }
-      if (!route.startsWith('/api/')) throw new HttpError(404, 'NOT_FOUND', '接口不存在');
+      if (!isAPI) throw new HttpError(404, 'NOT_FOUND', '接口不存在');
       if (!['GET', 'HEAD'].includes(req.method) && req.headers.origin !== origin) throw new HttpError(403, 'ORIGIN_REJECTED', '写请求需要匹配的 Origin');
       if (route === '/api/login' && req.method === 'POST') {
         const { username, password } = await jsonBody(req);
@@ -146,11 +155,11 @@ export async function createWebServer(config, { eventIntervalMs = 1000 } = {}) {
         const q = url.searchParams.get('q'), limit = Number(url.searchParams.get('limit') || 100);
         if (!q || q.length > 200 || !Number.isInteger(limit) || limit < 1 || limit > 500) throw new HttpError(400, 'INVALID_SEARCH', 'q 长度须为 1 到 200，limit 须为 1 到 500');
         const matches = [], skipped = []; let truncated = false;
-        search: for (const file of await files.tree(selected)) {
-          if (file.size > 5 * 1024 * 1024) { skipped.push(file.path); continue; }
+        search: for await (const file of files.contents(selected, 5 * 1024 * 1024)) {
+          if (file.bytes === null) { skipped.push(file.path); continue; }
           let text;
-          try { const bytes = await files.read(selected, file.path); if (bytes.includes(0)) { skipped.push(file.path); continue; } text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
-          catch (error) { if (error instanceof TypeError || error.status === 404) { skipped.push(file.path); continue; } throw error; }
+          try { if (file.bytes.includes(0)) { skipped.push(file.path); continue; } text = new TextDecoder('utf-8', { fatal: true }).decode(file.bytes); }
+          catch (error) { if (error instanceof TypeError) { skipped.push(file.path); continue; } throw error; }
           const lines = text.split(/\r\n|\n|\r/);
           for (let i = 0; i < lines.length; i++) {
             const at = lines[i].toLowerCase().indexOf(q.toLowerCase());

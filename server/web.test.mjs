@@ -13,7 +13,7 @@ import { run } from '../core/process.mjs';
 const origin = 'http://localhost';
 const original = Buffer.from('\uFEFF---\r\n# comment\r\nunknown: "value"\r\nblock: |\r\n  untouched\r\n---\r\n你好 café\r\n');
 const evidence = (scenario, data) => console.log(JSON.stringify({ scenario, ...data }));
-async function fixture(t, twoUsers = false) {
+async function fixture(t, twoUsers = false, withStatic = false) {
   const home = await mkdtemp(path.join(tmpdir(), 'infohub-web-'));
   t.after(() => rm(home, { recursive: true, force: true }));
   const remote = path.join(home, 'remote.git'), workspace = path.join(home, 'workspace'), peer = path.join(home, 'peer');
@@ -46,7 +46,14 @@ async function fixture(t, twoUsers = false) {
     await writeFile(path.join(second, 'private.txt'), 'second user only');
     users.push({ username: 'second', passwordHash, workspace: second });
   }
-  const app = await createWebServer({ version: 1, origin, users }, { eventIntervalMs: 100 });
+  let staticDir;
+  if (withStatic) {
+    staticDir = path.join(home, 'static'); await mkdir(path.join(staticDir, 'assets'), { recursive: true });
+    await writeFile(path.join(staticDir, 'index.html'), '<!doctype html><title>Static fixture</title><script type="module" src="/assets/app.js"></script>');
+    await writeFile(path.join(staticDir, 'assets/app.js'), 'console.log("version one");\n');
+    await writeFile(path.join(staticDir, 'assets/app.css'), 'body { color: blue; }\n');
+  }
+  const app = await createWebServer({ version: 1, origin, users, ...(staticDir ? { staticDir } : {}) }, { eventIntervalMs: 100 });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   t.after(() => app.close());
   const base = `http://127.0.0.1:${app.server.address().port}`;
@@ -54,7 +61,7 @@ async function fixture(t, twoUsers = false) {
   assert.equal(login.status, 200);
   const cookie = login.headers.get('set-cookie').split(';')[0];
   const request = (url, options = {}) => fetch(base + url, { ...options, headers: { Cookie: cookie, Origin: origin, ...options.headers } });
-  return { home, remote, workspace, peer, client, app, base, cookie, request };
+  return { home, remote, workspace, peer, client, app, base, cookie, request, staticDir };
 }
 const fileURL = name => `/api/file?source=workspace&path=${encodeURIComponent(name)}`;
 
@@ -168,4 +175,39 @@ test('authentication, path boundary, full text and JSON query parity with CLI', 
   evidence('http-cli-json-parity', { queries: ['find v1', 'get v1', 'around v1', 'overview v3', 'sync status v1'], unauthenticated: 401 });
   assert.equal((await f.request('/api/logout', { method: 'POST' })).status, 200);
   assert.equal((await f.request('/api/session')).status, 401);
+});
+
+
+test('optional static directory serves live assets and SPA routes while API remains authenticated', async t => {
+  const f = await fixture(t, false, true);
+  const index = await fetch(f.base + '/');
+  assert.equal(index.status, 200); assert.match(index.headers.get('content-type'), /^text\/html/);
+  const html = await index.text(); assert.match(html, /Static fixture/);
+  for (const route of ['/projects/one', '/projects/one/', '/assets/missing.js']) {
+    const response = await fetch(f.base + route); assert.equal(response.status, 200); assert.equal(await response.text(), html);
+  }
+  const js = await fetch(f.base + '/assets/app.js'), version = js.headers.get('etag');
+  assert.match(js.headers.get('content-type'), /^text\/javascript/); assert.equal(await js.text(), 'console.log("version one");\n');
+  assert.equal((await fetch(f.base + '/assets/app.js', { headers: { 'If-None-Match': version } })).status, 304);
+  const css = await fetch(f.base + '/assets/app.css'); assert.match(css.headers.get('content-type'), /^text\/css/);
+  await writeFile(path.join(f.staticDir, 'assets/app.js'), 'console.log("version two");\n');
+  const updated = await fetch(f.base + '/assets/app.js'); assert.equal(await updated.text(), 'console.log("version two");\n'); assert.notEqual(updated.headers.get('etag'), version);
+  assert.equal((await fetch(f.base + '/api/tree?source=workspace')).status, 401);
+  assert.equal((await fetch(f.base + '/api')).status, 401);
+  const unknownAPI = await f.request('/api/no-such-route?source=workspace'); assert.equal(unknownAPI.status, 404); assert.equal((await unknownAPI.json()).error.code, 'NOT_FOUND');
+  assert.deepEqual(await (await fetch(f.base + '/health')).json(), { ok: true });
+  for (const route of ['/assets/%2e%2e%2fsecret', '/assets/%5csecret', '/.env']) assert.equal((await fetch(f.base + route)).status, 400);
+  if (process.platform !== 'win32') {
+    await symlink(path.join(f.home, 'workspace'), path.join(f.staticDir, 'escape'));
+    assert.equal((await fetch(f.base + '/escape/raw.txt')).status, 403);
+  }
+  await rm(path.join(f.staticDir, 'index.html'));
+  assert.equal((await fetch(f.base + '/missing-spa-route')).status, 404);
+  console.log(JSON.stringify({ scenario: 'live-static-SPA', root: 200, asset: 200, fallback: 200, conditional: 304, liveAssetUpdate: true, protectedAPI: 401, apiFallback: false }));
+});
+
+test('omitting staticDir retains the placeholder and non-root 404', async t => {
+  const f = await fixture(t);
+  const root = await fetch(f.base + '/'); assert.equal(root.status, 200); assert.match(await root.text(), /Web API/);
+  assert.equal((await fetch(f.base + '/projects/one')).status, 404);
 });

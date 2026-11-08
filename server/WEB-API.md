@@ -1,12 +1,12 @@
 # InfoHub Web API v1
 
-本文件是浏览器客户端与 Web 服务之间的接口契约，随 work-ontology 代码维护。入口为 `node server/web.mjs`。所有路径相对于同一站点根地址，例如 `https://infohub.example.com`。批次 1 的 `/` 只有服务就绪占位页，浏览器前端由独立项目提供。
+本文件是浏览器客户端与 Web 服务之间的接口契约，随 work-ontology 代码维护。入口为 `node server/web.mjs`。所有路径相对于同一站点根地址，例如 `https://infohub.example.com`。浏览器前端由独立项目构建，通过可选 `staticDir` 由 Web 服务同源托管；未配置时 `/` 显示服务就绪占位页。
 
 ## 通用约定
 
 - JSON 请求/响应使用 UTF-8。除文件读取和 SSE 外，响应为 `application/json; charset=utf-8`，包含数字 `version`。客户端须检查版本，未知版本提示升级，不能当成空数据。
 - 浏览器与 API 同源；没有跨源 CORS。`fetch` 可使用默认的同源 cookie 策略，显式设 `credentials: 'same-origin'` 也可。每个 POST、PUT、DELETE 请求都要求 `Origin` 精确等于服务器配置的 `origin`。浏览器会自动提供；脚本客户端必须提供。
-- 用户名和工作区由会话决定；请求不能指定其他用户或根目录。所有 `/api/` 路径均需有效会话，只有 `POST /api/login` 例外。`GET /health` 和占位 `/` 不需会话。
+- 用户名和工作区由会话决定；请求不能指定其他用户或根目录。所有 `/api` 和 `/api/` 路径均需有效会话，只有 `POST /api/login` 例外。`GET /health`、静态前端与未配置静态目录的占位 `/` 不需会话。
 - 读来源参数 `source` 必填：`workspace`、`main`、`draft:<id>`。`/api/session`、`/api/sources`、`/api/events` 是会话级接口，无需 `source`。
 - `workspace` 是此用户的普通 Git clone，可读写；`main`、草稿只读。它们来自该 clone 后台同步 fetch 的私有引用 `refs/infohub/remote/*`，不是直接读取其他用户的工作目录。更新速度由同步周期决定，刚上传的草稿在下一次 fetch 后出现。
 - 非 workspace 文件读取响应的 `commit` 标识该次请求冻结的 Git 提交。不同请求间来源可能前进；某份草稿被清理后再次读取会 404。
@@ -52,7 +52,7 @@
 {"version":1,"username":"alice","expiresAt":"2026-11-09T12:00:00.000Z"}
 ```
 
-设置 `infohub_session` cookie：`HttpOnly; SameSite=Strict; Path=/`；HTTPS 配置另加 `Secure`。会话默认有效 24 小时，固定到期，不滑动续期。令牌只存服务端内存中的哈希；服务重启会注销全部会话。用户名区分大小写。登录错误不会区分用户名不存在与密码错误。
+设置 `infohub_session` cookie：`HttpOnly; SameSite=Strict; Path=/`；HTTPS 配置另加 `Secure`。会话默认有效 24 小时，固定到期，不滑动续期。令牌只存服务端内存中的哈希；服务重启会注销全部会话。用户名区分大小写。登录错误不会区分用户名不存在与密码错误。失败记录最多保留 1000 个地址/用户名组合；满额时新失败记录淘汰最早插入的记录，不阻止其他组合尝试登录。
 
 ### `GET /api/session`
 
@@ -244,7 +244,20 @@ files 中的 `version` 是文件 ETag，删除为 null；最外层 `version` 是
 
 连接建立时发 ready 和当前 sync；收到 ready/reset 或 resync 时重新读取 tree、正在显示的文档、查询结果与 sources。**没有事件历史重放**，`Last-Event-ID` 不作为增量恢复承诺；每次重连都必须按 ready 重建快照。在重新读取期间缓冲或继续处理随后到来的失效事件，避免把旧读取结果当新快照。
 
-files 事件覆盖 HTTP 写入、外部文件变更以及同一后台同步的 Git 快进。服务器用文件系统通知和默认每秒一次的兜底扫描检测原字节变化；客户端无需轮询全库。连续短暂变化可能合并，只承诺反映最终状态。sync 变化时刷新来源列表，以便发现新草稿、清理和 main 更新。接收缓慢、缓存超过 1 MiB 的连接关闭，客户端按 ready 重新同步。
+files 事件覆盖 HTTP 写入、外部文件变更以及同一后台同步的 Git 快进。文件系统通知是主通道，默认每 30 秒一次 stat 扫描兜底；比较 size、mtime、ctime、inode、device、mode，仅元数据变化的文件才读原字节并重算 ETag。内容不变不发 files 事件。同步状态独立观察，每 2 秒读取小型状态投影兜底，不遍历文档内容；客户端无需轮询全库。连续短暂变化可能合并，只承诺反映最终状态。sync 变化时刷新来源列表，以便发现新草稿、清理和 main 更新。接收缓慢、缓存超过 1 MiB 的连接关闭，客户端按 ready 重新同步。
+
+## 前端构建产物部署
+
+`staticDir` 是可选的绝对目录，必须存在、可读，并与全部用户 workspace 分离。文件公开提供，无需会话；该目录只放前端构建产物，不放凭据或 InfoHub 内容。未配置时保持 `/` 占位页和其他非 API 路径 404。配置后：
+
+- `GET /` 读取 `index.html`，非 `/api`、`/api/` 的 GET 按 URL 路径读取静态文件；找不到文件或路径是目录时回退到根 `index.html`，支持 SPA 深层路由和尾斜杠。
+- `/health` 始终返回健康 JSON，API 始终校验会话，API 错误不会回退成 HTML。只支持 GET 静态读取。
+- JS、CSS、HTML、字体、WASM、图片等按扩展名提供 Content-Type，响应有 `nosniff`、原字节 ETag、`Cache-Control: no-cache`；客户端可用 If-None-Match 得到 304。静态资源不附加文档内容接口的 sandbox CSP，以便前端脚本正常运行。
+- 禁止隐藏路径、反斜杠、穿越目录与符号链接。没有 `index.html` 且请求也没有对应文件时返回 404，明确表示产物未部署。
+
+netcup 已配置 `staticDir: "/server/data/infohub-web/static"`，同名宿主机目录只读挂入 Web 容器；不会挂进同步容器。批次 2 在前端仓库执行浏览器构建，将输出目录中的 **index.html 和 assets 等内容** 上传到该宿主目录（不要多套一层 dist）。构建产物目录和文件至少应允许容器 UID 1000 读取/遍历，通常目录 0755、文件 0644。使用 Netcatty SSH/SFTP 操作，凭据方式见 server 仓库约定。
+
+部署产物无需重建镜像或重启容器。先上传带内容哈希的新资源，最后通过同一目录下的临时文件 rename 更新 `index.html`；回退 SPA 路由和新资源随下一次请求立即生效。保持宿主机 static 目录本身不变（不要替换目录 inode），并保留仍可能被已打开页面引用的旧哈希资源，确认无需回退后再清理。初次未放前端时已有占位 index.html，可由真实构建入口替换。
 
 ## 服务配置与运行
 
@@ -257,6 +270,7 @@ files 事件覆盖 HTTP 写入、外部文件变更以及同一后台同步的 G
   "host": "0.0.0.0",
   "port": 3000,
   "sessionTtlSeconds": 86400,
+  "staticDir": "/persistent/static",
   "users": [
     {"username":"alice","passwordHash":"scrypt:<32 hex salt>:<128 hex digest>","workspace":"/persistent/workspaces/alice"}
   ]

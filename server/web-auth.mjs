@@ -23,12 +23,13 @@ export class Sessions {
     for (const [key, entry] of this.attempts) if (entry.until < now) this.attempts.delete(key);
     const key = `${address}:${username}`, attempt = this.attempts.get(key);
     if (attempt?.count >= 10) return { limited: true };
-    if (this.attempts.size >= 1000) return { limited: true };
     const user = this.users.find(u => u.username === username);
     const [, salt, hash] = (user?.passwordHash || `scrypt:${'0'.repeat(32)}:${'0'.repeat(128)}`).split(':');
     const actual = await scrypt(password, salt, 64);
     if (!user || !timingSafeEqual(actual, Buffer.from(hash, 'hex'))) {
-      this.attempts.set(key, { count: (attempt?.count || 0) + 1, until: attempt?.until || now + 60000 });
+      const prior = this.attempts.get(key);
+      if (!prior && this.attempts.size >= 1000) this.attempts.delete(this.attempts.keys().next().value);
+      this.attempts.set(key, { count: (prior?.count || 0) + 1, until: prior?.until || now + 60000 });
       return {};
     }
     this.attempts.delete(key);

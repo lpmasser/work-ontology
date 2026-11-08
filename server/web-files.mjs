@@ -16,12 +16,15 @@ export function filePath(value) {
   if (typeof value !== 'string' || !value || value.includes('\\') || /[\0-\x1f\x7f]/.test(value) || value.split('/').some(p => !p || p.startsWith('.')) || path.isAbsolute(value)) throw new HttpError(400, 'INVALID_PATH', '路径必须是非隐藏的相对文件路径');
   return value;
 }
-async function gitBytes(root, args) {
+async function gitBytes(root, args, input) {
   try {
-    return (await exec(executable('git'), ['-c', 'maintenance.auto=false', '-c', 'gc.auto=0', ...args], {
+    const task = exec(executable('git'), ['-c', 'maintenance.auto=false', '-c', 'gc.auto=0', ...args], {
       cwd: root, encoding: 'buffer', maxBuffer: 64 * 1024 * 1024, timeout: 15000,
       env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' },
-    })).stdout;
+    });
+    task.child.stdin.on('error', () => {});
+    task.child.stdin.end(input);
+    return (await task).stdout;
   } catch { throw new HttpError(503, 'SOURCE_UNAVAILABLE', '无法读取 Git 来源，请稍后重试'); }
 }
 export async function safePath(root, relative) {
@@ -60,39 +63,84 @@ export class Files {
       }),
     ];
   }
+  async commitTree(selected) {
+    const output = await gitBytes(this.root, ['ls-tree', '-r', '-z', '-l', selected.commit]);
+    return output.toString('utf8').split('\0').filter(Boolean).flatMap(record => {
+      const tab = record.indexOf('\t'), [mode, type, oid, size] = record.slice(0, tab).trim().split(/\s+/), name = record.slice(tab + 1);
+      if (type !== 'blob' || !['100644', '100755'].includes(mode) || name.split('/').some(p => p.startsWith('.'))) return [];
+      return [{ path: name, size: Number(size), oid }];
+    }).sort((a, b) => a.path.localeCompare(b.path));
+  }
   async tree(selected) {
-    if (selected.commit) {
-      const output = await gitBytes(this.root, ['ls-tree', '-r', '-z', '-l', selected.commit]);
-      return output.toString('utf8').split('\0').filter(Boolean).flatMap(record => {
-        const tab = record.indexOf('\t'), [mode, type, , size] = record.slice(0, tab).trim().split(/\s+/), name = record.slice(tab + 1);
-        if (type !== 'blob' || !['100644', '100755'].includes(mode) || name.split('/').some(p => p.startsWith('.'))) return [];
-        return [{ path: name, size: Number(size) }];
-      }).sort((a, b) => a.path.localeCompare(b.path));
-    }
+    const entries = selected.commit ? await this.commitTree(selected) : await this.workspaceStats();
+    return entries.map(({ path, size }) => ({ path, size }));
+  }
+  async workspaceStats() {
     const files = [];
     const walk = async relative => {
       let entries;
-      try { entries = await readdir(path.join(this.root, relative), { withFileTypes: true }); }
+      try { entries = await readdir(relative ? await safePath(this.root, relative) : this.root, { withFileTypes: true }); }
       catch (error) { if (error.code === 'ENOENT') return; throw error; }
       for (const entry of entries) {
         if (entry.name.startsWith('.') || entry.isSymbolicLink()) continue;
         const name = relative ? `${relative}/${entry.name}` : entry.name;
         if (entry.isDirectory()) await walk(name);
         else if (entry.isFile()) {
-          try { files.push({ path: name, size: (await lstat(await safePath(this.root, name))).size }); }
-          catch (error) { if (error.code !== 'ENOENT') throw error; }
+          try {
+            const s = await lstat(path.join(this.root, name), { bigint: true });
+            if (s.isFile()) files.push({ path: name, size: Number(s.size), fingerprint: [s.size, s.mtimeNs, s.ctimeNs, s.ino, s.dev, s.mode].join(':') });
+          } catch (error) { if (error.code !== 'ENOENT') throw error; }
         }
       }
     };
     await walk('');
     return files.sort((a, b) => a.path.localeCompare(b.path));
   }
+  async readBatch(entries, maxSize) {
+    const readable = entries.filter(file => file.size <= maxSize);
+    const output = readable.length ? await gitBytes(this.root, ['cat-file', '--batch'], readable.map(file => file.oid).join('\n') + '\n') : Buffer.alloc(0);
+    let offset = 0;
+    const results = entries.map(file => {
+      if (file.size > maxSize) return { ...file, bytes: null };
+      const end = output.indexOf(10, offset);
+      const header = output.subarray(offset, end).toString('ascii');
+      if (end < offset || header !== `${file.oid} blob ${file.size}` || output[end + 1 + file.size] !== 10) throw new HttpError(503, 'SOURCE_UNAVAILABLE', 'Git 批量读取返回无效数据');
+      const bytes = output.subarray(end + 1, end + 1 + file.size);
+      offset = end + 2 + file.size;
+      return { ...file, bytes };
+    });
+    if (offset !== output.length) throw new HttpError(503, 'SOURCE_UNAVAILABLE', 'Git 批量读取返回多余数据');
+    return results;
+  }
+  async *contents(selected, maxSize) {
+    if (!selected.commit) {
+      for (const file of await this.tree(selected)) {
+        let bytes = null;
+        if (file.size <= maxSize) {
+          try { bytes = await this.read(selected, file.path); }
+          catch (error) { if (error.status !== 404) throw error; }
+        }
+        yield { ...file, bytes };
+      }
+      return;
+    }
+    let batch = [], size = 0;
+    for (const file of await this.commitTree(selected)) {
+      if (size && size + Math.min(file.size, maxSize) > 16 * 1024 * 1024) {
+        yield* await this.readBatch(batch, maxSize); batch = []; size = 0;
+      }
+      batch.push(file);
+      if (file.size <= maxSize) size += file.size;
+    }
+    if (batch.length) yield* await this.readBatch(batch, maxSize);
+  }
   async read(selected, relative) {
     filePath(relative);
     if (selected.commit) {
       // Tree membership also excludes symlinks and Git's special pathspec syntax.
-      if (!(await this.tree(selected)).some(f => f.path === relative)) throw new HttpError(404, 'FILE_NOT_FOUND', '文件不存在');
-      return gitBytes(this.root, ['cat-file', 'blob', `${selected.commit}:${relative}`]);
+      const file = (await this.commitTree(selected)).find(f => f.path === relative);
+      if (!file) throw new HttpError(404, 'FILE_NOT_FOUND', '文件不存在');
+      return gitBytes(this.root, ['cat-file', 'blob', file.oid]);
     }
     const full = await safePath(this.root, relative);
     try {
