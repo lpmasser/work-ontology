@@ -15,7 +15,7 @@ The initial installation asks for no hard-coded server: supply your own InfoHub 
 
 The installer sets up the `infohub` command and the workspace's agent instructions/skills, removes obsolete synchronization launchers, and installs [InfoHub Workbench](https://github.com/lpmasser/infohub-workbench) from its signed GitHub Release if absent. Existing desktop applications handle their own updates through the official Tauri updater. Desktop synchronization is managed by the workbench; server synchronization runs in Docker.
 
-An InfoHub workspace supplies `ontology/ontology.json`, Markdown objects, its agent instructions, and any workspace-owned skills. `core/` owns parsing and queries, `cli/` exposes commands, `sync/` owns synchronization, `server/` supplies validation and draft handling, and `hooks/pre-receive` integrates push validation with a Git server.
+An InfoHub workspace supplies `ontology/ontology.json`, Markdown objects, its agent instructions, and any workspace-owned skills. `core/` owns parsing and queries, `cli/` exposes commands, `sync/` owns synchronization, `server/` supplies validation, draft handling, and the authenticated Web service ([API contract](server/WEB-API.md)), and `hooks/pre-receive` integrates push validation with a Git server.
 
 ```sh
 infohub brief <project>

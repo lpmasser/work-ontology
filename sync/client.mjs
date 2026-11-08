@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { git, value, json, save, sha256, iso, gitBusy, isAncestor, DRAFT_PREFIX, REMOTE_PREFIX } from './git.mjs';
 import { validateCommit } from './validate.mjs';
+import { withWorkspaceLock } from './workspace-lock.mjs';
 
 export const defaults = { fetchSeconds: 5, draftSeconds: 180, idleSeconds: 1800 };
 export async function context(root, signal) {
@@ -19,7 +20,7 @@ export async function belongsToMovedCopy(ctx, previousRoot) {
   try { return await realpath(path.join(previousRoot, '.git')) === ctx.dir; }
   catch (error) { if (error.code === 'ENOENT') return true; throw error; }
 }
-export async function identity(ctx) {
+export async function identity(ctx, configured) {
   const file = path.join(ctx.home, 'identity.json');
   let id = await json(file);
   if (!id) {
@@ -32,6 +33,11 @@ export async function identity(ctx) {
     id = { id: randomUUID(), machine: hostname(), user: userInfo().username, root: ctx.root, previousIds };
     await save(file, id);
   }
+  if (configured) {
+    const next = { ...id, user: configured.user, machine: configured.machine };
+    if (next.user !== id.user || next.machine !== id.machine) await save(file, next);
+    id = next;
+  }
   return id;
 }
 export async function config(ctx, overrides = {}) {
@@ -39,6 +45,16 @@ export async function config(ctx, overrides = {}) {
   const settings = Object.fromEntries(Object.entries(defaults).map(([key, fallback]) => [key, overrides[key] ?? saved[key] ?? fallback]));
   for (const k of ['fetchSeconds', 'draftSeconds', 'idleSeconds']) {
     if (!Number.isFinite(settings[k]) || settings[k] <= 0) throw new Error(`${k} 必须是正数`);
+  }
+  const configuredIdentity = overrides.identity ?? saved.identity;
+  if (configuredIdentity !== undefined) {
+    if (!configuredIdentity || ['user', 'machine'].some(key => typeof configuredIdentity[key] !== 'string' || !configuredIdentity[key].trim() || /[\r\n\0<>]/.test(configuredIdentity[key]))) throw new Error('identity 需要有效的 user 和 machine');
+    settings.identity = { user: configuredIdentity.user, machine: configuredIdentity.machine };
+  }
+  const workspaceLock = overrides.workspaceLock ?? saved.workspaceLock;
+  if (workspaceLock !== undefined) {
+    if (typeof workspaceLock !== 'boolean') throw new Error('workspaceLock 必须是布尔值');
+    settings.workspaceLock = workspaceLock;
   }
   await value(ctx, ['remote', 'get-url', 'origin']);
   return settings;
@@ -82,13 +98,16 @@ export class Client {
   constructor(ctx, settings, id, state) { Object.assign(this, { ctx, settings, id, state }); this.lastKey = null; this.changedAt = Date.now(); this.nextDraft = 0; }
   static async open(root, overrides, signal) {
     const ctx = await context(root, signal);
-    const settings = await config(ctx, overrides), id = await identity(ctx);
+    const settings = await config(ctx, overrides), id = await identity(ctx, settings.identity);
     const state = await json(path.join(ctx.home, 'state.json'), {});
     return new Client(ctx, settings, id, { ...state, clone: id, startedAt: iso(), pending: {} });
   }
   tick() {
     if (!this.inFlight) this.inFlight = this.runTick().finally(() => { this.inFlight = null; });
     return this.inFlight;
+  }
+  write(action) {
+    return this.settings.workspaceLock ? withWorkspaceLock(this.ctx.root, action, { signal: this.ctx.signal }) : action();
   }
   async network(kind, args) {
     const backoff = this.state.backoff ||= {};
@@ -139,7 +158,10 @@ export class Client {
             if (busy) { pending.pull = busy.reason; if (busy.inRepo) this.changedAt = Date.now(); }
             else try {
               // Disable autostash even when the user's global config enables it.
-              await git(ctx, ['-c', 'merge.autostash=false', 'merge', '--ff-only', '--no-edit', remote]);
+              await this.write(async () => {
+                if (settings.workspaceLock && (await fingerprint(ctx)).key !== fp.key) throw new Error('快进前工作区变化，下一轮重试');
+                await git(ctx, ['-c', 'merge.autostash=false', 'merge', '--ff-only', '--no-edit', remote]);
+              });
               state.lastPull = iso(); state.blockedFiles = [];
               fp = await fingerprint(ctx);
             } catch (e) { fail('pull', e); }
@@ -201,6 +223,7 @@ export class Client {
       if (!fetched || !backedUp) { pending.push = '尚未取得本轮远端状态或草稿备份，暂不自动提交'; return; }
       if (!await isAncestor(ctx, remoteHead, fp.head)) { pending.push = '本地尚未包含远端 main，草稿已保留，需 Agent 合并'; return; }
       try {
+        await this.write(async () => {
         if (await gitBusy(ctx) || (await fingerprint(ctx)).key !== fp.key) throw new Error('自动提交前本地状态变化，下一轮重试');
         if (fp.dirty) {
           // Use ordinary Git commands so Git owns index/HEAD transactions and hooks.
@@ -210,9 +233,11 @@ export class Client {
           if (staged.head !== fp.head || await gitBusy(ctx)) throw new Error('暂存后 Git 状态变化，保留暂存与草稿');
           // Match the backed-up tree; fresh editor changes remain pending for the next idle interval.
           if (await value(ctx, ['write-tree']) !== state.draft.tree) throw new Error('暂存内容与草稿不同，保留现场，重新观察闲置');
-          await git(ctx, ['commit', '-m', `InfoHub 自动提交：${id.user}@${id.machine}\n\nClone: ${id.id}`]);
+          const author = settings.identity ? { env: { GIT_AUTHOR_NAME: id.user, GIT_AUTHOR_EMAIL: `${id.id}@infohub.local` } } : {};
+          await git(ctx, ['commit', '-m', `InfoHub 自动提交：${id.user}@${id.machine}\n\nClone: ${id.id}`], author);
           state.lastCommit = iso();
         }
+        });
         const head = await value(ctx, ['rev-parse', 'HEAD']);
         if (await gitBusy(ctx)) throw new Error('推送前有 Git 操作，下一轮重试');
         await this.network('push', ['push', 'origin', `${head}:refs/heads/main`]);

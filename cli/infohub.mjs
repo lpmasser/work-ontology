@@ -5,7 +5,8 @@ import { realpathSync } from 'node:fs';
 import { configureRuntime, readConfig } from '../core/runtime.mjs';
 import { loadVault } from '../core/vault.mjs';
 import { buildOverview } from '../core/overview.mjs';
-import { searchAround, isUnfinishedWork } from '../core/engine.js';
+import { isUnfinishedWork } from '../core/engine.js';
+import { resolveProject, filterObjects, queryFind, queryGet, queryAround } from '../core/query.mjs';
 import { checkPaths, selectIssues } from '../core/validation.mjs';
 import { command as syncCommand, concerns } from '../sync/command.mjs';
 
@@ -23,7 +24,7 @@ const USAGE = `用法: infohub <命令> [参数...]
 
 选项:
   --root <目录>                                             指定 InfoHub 根目录（覆盖配置文件）
-  find --json                                              输出 version、objects、issues，保留完整属性
+  find/get/around --json                                    输出带 version 的查询 JSON
   find --where-not <k=v> [--has <字段>]                     排除匹配值；要求字段非空，可重复
 `;
 
@@ -41,26 +42,6 @@ function parseCliArgs(argv) {
     }
   }
   return { root, args: filtered };
-}
-
-function resolveObjectId(index, idOrPath) {
-  idOrPath = idOrPath.replaceAll('\\', '/');
-  if (idOrPath.endsWith('.md')) {
-    for (const obj of index.objects.values()) {
-      if (obj.path === idOrPath) return obj.id;
-    }
-    return null;
-  }
-  return index.objects.has(idOrPath) ? idOrPath : null;
-}
-
-function resolveProject(index, target) {
-  const projects = [...index.objects.values()].filter(o => o.type === 'project');
-  const found = projects.find(p => p.id === target || p.title === target);
-  if (found) return found;
-
-  const list = projects.map(p => `  ${p.id}  ${p.title}`).join('\n');
-  throw new Error(`找不到项目 "${target}"。可用项目:\n${list || '  (无项目)'}`);
 }
 
 async function handleBrief(vault, target, root) {
@@ -134,97 +115,6 @@ async function handleBrief(vault, target, root) {
   console.log(output.join('\n'));
 }
 
-function queryFind(vault, findArgs) {
-  let type = null;
-  let projectFilter = null;
-  const whereClauses = [];
-  const excludedClauses = [];
-  const requiredFields = [];
-  let json = false;
-  const textWords = [];
-
-  for (let i = 0; i < findArgs.length; i++) {
-    const arg = findArgs[i];
-    if (arg === '--type') {
-      if (i + 1 >= findArgs.length) throw new Error('--type 缺少参数');
-      type = findArgs[++i];
-    } else if (arg === '--project') {
-      if (i + 1 >= findArgs.length) throw new Error('--project 缺少参数');
-      projectFilter = findArgs[++i];
-    } else if (arg === '--json') {
-      json = true;
-    } else if (arg === '--has') {
-      if (i + 1 >= findArgs.length) throw new Error('--has 缺少参数');
-      requiredFields.push(findArgs[++i]);
-    } else if (arg === '--where' || arg === '--where-not') {
-      if (i + 1 >= findArgs.length) throw new Error(`${arg} 缺少参数`);
-      const clause = findArgs[++i];
-      const eqIdx = clause.indexOf('=');
-      if (eqIdx === -1) throw new Error(`--where 参数格式必须为 字段=值: ${clause}`);
-      (arg === '--where' ? whereClauses : excludedClauses).push([clause.slice(0, eqIdx), clause.slice(eqIdx + 1)]);
-    } else if (arg.startsWith('--')) {
-      throw new Error(`未知 find 选项: ${arg}`);
-    } else {
-      textWords.push(arg);
-    }
-  }
-
-  const text = textWords.join(' ');
-  if (!type && !projectFilter && whereClauses.length === 0 && excludedClauses.length === 0 && requiredFields.length === 0 && !text) {
-    throw new Error('find 命令必须至少提供一个条件（文本、--type、--project、--where）');
-  }
-
-  const projectId = projectFilter ? resolveProject(vault.index, projectFilter).id : null;
-  const results = filterObjects(vault, { type, projectId, whereClauses, excludedClauses, requiredFields, text });
-  return { json, snapshot: { version: 1, objects: results, issues: vault.index.issues } };
-}
-
-function filterObjects(vault, { type, projectId, whereClauses = [], excludedClauses = [], requiredFields = [], text } = {}) {
-
-  const bodiesByPath = new Map(vault.notes.map(n => [n.path, n.body]));
-  const textLower = text ? text.toLowerCase() : null;
-
-  const results = [];
-  for (const obj of vault.index.objects.values()) {
-    if (type && obj.type !== type) continue;
-    if (projectId && obj.frontmatter.project_id !== projectId) continue;
-
-    let whereMatch = true;
-    for (const [key, val] of whereClauses) {
-      const actual = obj.frontmatter[key];
-      if (Array.isArray(actual)) {
-        if (!actual.some(item => String(item) === val)) {
-          whereMatch = false;
-          break;
-        }
-      } else if (actual == null || String(actual) !== val) {
-        whereMatch = false;
-        break;
-      }
-    }
-    if (!whereMatch) continue;
-    if (excludedClauses.some(([key, val]) => {
-      const actual = obj.frontmatter[key];
-      return Array.isArray(actual) ? actual.some(item => String(item) === val) : actual != null && String(actual) === val;
-    })) continue;
-    if (requiredFields.some(key => {
-      const actual = obj.frontmatter[key];
-      return Array.isArray(actual) ? actual.length === 0 : !actual;
-    })) continue;
-
-    if (textLower) {
-      const inTitle = (obj.title ?? '').toLowerCase().includes(textLower);
-      const body = bodiesByPath.get(obj.path) || '';
-      const inBody = body.toLowerCase().includes(textLower);
-      if (!inTitle && !inBody) continue;
-    }
-
-    results.push(obj);
-  }
-
-  return results;
-}
-
 function handleFind(vault, findArgs) {
   const { json, snapshot } = queryFind(vault, findArgs);
   if (json) {
@@ -242,37 +132,8 @@ function handleOverview(vault) {
 }
 
 async function handleAround(vault, aroundArgs) {
-  const idsOrPaths = [];
-  let relation = undefined;
-  let direction = 'both';
-
-  for (let i = 0; i < aroundArgs.length; i++) {
-    const arg = aroundArgs[i];
-    if (arg === '--relation') {
-      if (i + 1 >= aroundArgs.length) throw new Error('--relation 缺少参数');
-      relation = aroundArgs[++i];
-    } else if (arg === '--direction') {
-      if (i + 1 >= aroundArgs.length) throw new Error('--direction 缺少参数');
-      const d = aroundArgs[++i];
-      if (d === 'outgoing') direction = 'out';
-      else if (d === 'incoming') direction = 'in';
-      else throw new Error(`--direction 只能是 outgoing 或 incoming，当前为: ${d}`);
-    } else {
-      idsOrPaths.push(arg);
-    }
-  }
-
-  if (idsOrPaths.length === 0) {
-    throw new Error('around 命令缺少起点 ID 或路径');
-  }
-
-  const ids = idsOrPaths.map(item => {
-    const resolved = resolveObjectId(vault.index, item);
-    if (!resolved) throw new Error(`找不到起点对象: ${item}`);
-    return resolved;
-  });
-
-  const res = searchAround(vault.index, vault.model, { ids, relation, direction });
+  const res = queryAround(vault, aroundArgs);
+  if (aroundArgs.includes('--json')) { console.log(JSON.stringify(res)); return; }
 
   const matchedGroups = res.groups.filter(g => g.total > 0);
   if (matchedGroups.length === 0) {
@@ -288,17 +149,10 @@ async function handleAround(vault, aroundArgs) {
   }
 }
 
-async function handleGet(vault, target) {
-  if (!target) {
-    throw new Error('get 命令缺少 ID 或路径参数');
-  }
-
-  const id = resolveObjectId(vault.index, target);
-  if (!id) {
-    throw new Error(`找不到对象: ${target}`);
-  }
-
-  const obj = vault.index.objects.get(id);
+async function handleGet(vault, target, json) {
+  const snapshot = queryGet(vault, target);
+  if (json) { console.log(JSON.stringify(snapshot)); return; }
+  const obj = snapshot.object;
   console.log(`路径: ${obj.path}`);
   for (const [key, val] of Object.entries(obj.frontmatter)) {
     const displayVal = Array.isArray(val) ? val.join(', ') : val;
@@ -353,7 +207,7 @@ export async function main(argv = process.argv.slice(2)) {
       await handleAround(vault, args.slice(1));
       return 0;
     case 'get':
-      await handleGet(vault, args[1]);
+      await handleGet(vault, args.slice(1).find(arg => arg !== '--json'), args.includes('--json'));
       return 0;
     case 'check':
       return await handleCheck(vault, args.slice(1), root);
