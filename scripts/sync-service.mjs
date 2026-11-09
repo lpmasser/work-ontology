@@ -84,6 +84,11 @@ export async function preflightSyncService(root, { platform = process.platform, 
   else if (platform === 'win32') await execute('schtasks.exe', ['/Query']);
   else throw new Error(`不支持的系统服务平台: ${platform}`);
 }
+export function hasCurrentFetch(state, previous, reuse) {
+  const started = Date.parse(state.startedAt), fetched = Date.parse(state.lastFetch);
+  const currentStart = reuse && state.pid === previous.pid || started > (Date.parse(previous.startedAt) || 0);
+  return state.running && currentStart && fetched >= started;
+}
 export async function ensureSyncService(root, runtime, { home = homedir(), platform = process.platform, execute = run, timeoutMs = 60000 } = {}) {
   const ctx = await context(root), release = await lease(path.join(ctx.home, 'manage.pid'));
   try {
@@ -110,7 +115,7 @@ export async function ensureSyncService(root, runtime, { home = homedir(), platf
       registered = actual.logonType === 'S4U' && actual.enabled && actual.watchdog && actual.program === runtime.node && actual.arguments === args;
     }
     const loaded = await serviceLoaded(loc, execute);
-    const wasRunning = (await status(root)).running;
+    const previousStatus = await status(root), wasRunning = previousStatus.running;
     const unchanged = current === desired && sameRunner && registered;
     if (!unchanged && (loaded || current)) await stopService(loc, root, execute);
     if (!loaded && wasRunning) throw new Error('此副本仍有其他宿主的同步循环；请先安全退出该宿主，未登记第二个服务');
@@ -132,7 +137,7 @@ export async function ensureSyncService(root, runtime, { home = homedir(), platf
     let s;
     do {
       s = await status(root);
-      if (s.running && s.manager === loc.manager && Date.parse(s.lastFetch) >= Date.parse(s.startedAt)) {
+      if (s.manager === loc.manager && hasCurrentFetch(s, previousStatus, unchanged && wasRunning)) {
         console.log(`系统同步服务已就绪: ${loc.manager} / ${loc.name}；日志: ${log}`); return { ...loc, log, pid: s.pid };
       }
       if (s.running && s.pending.fetch) throw new Error(`系统服务已启动但拉取失败：${s.pending.fetch}；检查非交互 SSH、known_hosts、密钥及批处理登录权限，Windows S4U 不支持依赖 EFS/DPAPI/交互代理的凭据`);

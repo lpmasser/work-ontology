@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm, access, stat } from 'node:fs/p
 import { tmpdir, homedir } from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { serviceLocation, serviceDefinition, ensureSyncService, stopService } from './sync-service.mjs';
+import { serviceLocation, serviceDefinition, ensureSyncService, stopService, hasCurrentFetch } from './sync-service.mjs';
 import { retireWorkbench, desktopProcesses } from './retire-workbench.mjs';
 import { requestServiceStop } from './service-control.mjs';
 import { git, value, save, alive } from '../sync/git.mjs';
@@ -30,6 +30,17 @@ async function until(fn, ms = 15000) {
   while (Date.now() < deadline) { if (await fn()) return; await new Promise(r => setTimeout(r, 100)); }
   throw new Error('等待状态超时');
 }
+
+test('a fresh PID cannot reuse the previous daemon startup and fetch timestamps', () => {
+  const previous = { running: true, pid: 100, startedAt: '2026-01-01T00:00:00Z', lastFetch: '2026-01-01T00:00:10Z' };
+  assert.equal(hasCurrentFetch(previous, previous, true), true);
+  const stale = { ...previous, pid: 101 };
+  assert.equal(hasCurrentFetch(stale, previous, false), false);
+  assert.equal(hasCurrentFetch(stale, previous, true), false);
+  const started = { ...stale, startedAt: '2026-01-01T00:00:20Z' };
+  assert.equal(hasCurrentFetch(started, previous, false), false);
+  assert.equal(hasCurrentFetch({ ...started, lastFetch: '2026-01-01T00:00:21Z' }, previous, false), true);
+});
 
 test('native definitions parse with platform tools, keep special paths and restart/login settings', async t => {
   const { base, root } = await fixture(t), id = '11111111-1111-4111-8111-111111111111';
@@ -91,7 +102,7 @@ test('real OS user service reuses PID on reinstall, restarts a failed loop, and 
     if (id) await stopService(serviceLocation(id), root);
   });
   const installed = await ensureSyncService(root, runtime);
-  const before = await stat(installed.file), firstPid = installed.pid;
+  const before = await stat(installed.file), firstPid = installed.pid, initialState = await status(root);
   const repeated = await ensureSyncService(root, runtime);
   assert.equal(repeated.pid, firstPid); assert.equal((await stat(installed.file)).mtimeMs, before.mtimeMs);
   // Only terminate our idle fixture daemon, never an active Git process.
@@ -99,7 +110,7 @@ test('real OS user service reuses PID on reinstall, restarts a failed loop, and 
   if (process.platform === 'win32') await run('taskkill.exe', ['/PID', String(firstPid), '/F']);
   else process.kill(firstPid, 'SIGKILL');
   try {
-    await until(async () => { const s = await status(root); return s.running && s.pid !== firstPid && Date.parse(s.lastFetch) >= Date.parse(s.startedAt); }, 100000);
+    await until(async () => { const s = await status(root); return s.pid !== firstPid && hasCurrentFetch(s, initialState, false); }, 100000);
   } catch (error) {
     const s = await status(root), log = await readFile(installed.log, 'utf8');
     let native = '';
@@ -107,6 +118,6 @@ test('real OS user service reuses PID on reinstall, restarts a failed loop, and 
     throw new Error(`${error.message}; native=${native}; status=${JSON.stringify(s)}; log=${log}`);
   }
   const restarted = await status(root); assert.ok(alive(restarted.pid));
-  console.log(JSON.stringify({ scenario: 'native-user-service', manager: installed.manager, firstPid, repeatedPid: repeated.pid, restartedPid: restarted.pid, lastFetch: restarted.lastFetch }));
+  console.log(JSON.stringify({ scenario: 'native-user-service', manager: installed.manager, firstPid, repeatedPid: repeated.pid, restartedPid: restarted.pid, startedAt: restarted.startedAt, lastFetch: restarted.lastFetch }));
   assert.equal(await value(root, ['status', '--porcelain']), '');
 });
