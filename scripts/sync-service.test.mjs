@@ -98,7 +98,14 @@ test('real OS user service reuses PID on reinstall, restarts a failed loop, and 
   await until(async () => { const s = await status(root); return s.lastFetch && Date.now() - Date.parse(s.finishedAt) < 100; });
   if (process.platform === 'win32') await run('taskkill.exe', ['/PID', String(firstPid), '/F']);
   else process.kill(firstPid, 'SIGKILL');
-  await until(async () => { const s = await status(root); return s.running && s.pid !== firstPid && Date.parse(s.lastFetch) >= Date.parse(s.startedAt); }, 100000);
+  try {
+    await until(async () => { const s = await status(root); return s.running && s.pid !== firstPid && Date.parse(s.lastFetch) >= Date.parse(s.startedAt); }, 100000);
+  } catch (error) {
+    const s = await status(root), log = await readFile(installed.log, 'utf8');
+    let native = '';
+    if (process.platform === 'win32') native = (await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '$t=Get-ScheduledTask -TaskName $env:INFOHUB_TASK_NAME; $i=$t | Get-ScheduledTaskInfo; @{state=$t.State.ToString();lastResult=$i.LastTaskResult;lastRun=$i.LastRunTime.ToString("o");restartCount=$t.Settings.RestartCount;restartInterval=$t.Settings.RestartInterval} | ConvertTo-Json -Compress'], { env: { INFOHUB_TASK_NAME: installed.name } })).stdout;
+    throw new Error(`${error.message}; native=${native}; status=${JSON.stringify(s)}; log=${log}`);
+  }
   const restarted = await status(root); assert.ok(alive(restarted.pid));
   console.log(JSON.stringify({ scenario: 'native-user-service', manager: installed.manager, firstPid, repeatedPid: repeated.pid, restartedPid: restarted.pid, lastFetch: restarted.lastFetch }));
   assert.equal(await value(root, ['status', '--porcelain']), '');

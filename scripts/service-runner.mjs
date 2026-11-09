@@ -26,7 +26,9 @@ export async function serviceRunner(file) {
       env: { ...process.env, PATH: minimalPath(settings.runtime), INFOHUB_SYNC_MANAGER: 'task-scheduler', INFOHUB_SYNC_LOG: settings.log },
     });
     child.stdin.on('error', () => {});
-    return await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', code => resolve(stopping ? 0 : code || 1)); });
+    const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', code => resolve(stopping ? 0 : code || 1)); });
+    await log.write(`${new Date().toISOString()} service child exited: ${code}; stopping=${stopping}\n`);
+    return code;
   } finally {
     process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop);
     if (ipc) await new Promise(resolve => ipc.close(resolve));
