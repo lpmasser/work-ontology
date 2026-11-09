@@ -1,49 +1,35 @@
-# Native synchronization services
+# On-demand synchronization and migration
 
-`node scripts/install.mjs --root <InfoHub clone>` installs the CLI and native user service. Supply `--infohub-url <repository>` on first setup. The service runs the existing foreground `infohub sync run`; no desktop download or application release is involved. Content, validation, draft backups, network retries and the PID lease remain owned by `sync/`.
+Local agents start synchronization through `infohub brief` or `infohub check`. Installation only installs the CLI, Skill and resident instructions and retires old hosts. No LaunchAgent, systemd service or scheduled task is created. Docker-managed server clones keep their existing continuous hosting; do not run the local installer there.
 
-| Platform | Registration | Login / restart | Log |
-| --- | --- | --- | --- |
-| macOS | `~/Library/LaunchAgents/de.eloyzh.infohub-sync.<clone UUID>.plist` | GUI login, KeepAlive, 5 s throttle | `<clone>/.git/infohub-sync/service.log` |
-| Linux | `~/.config/systemd/user/de.eloyzh.infohub-sync.<clone UUID>.service` | user manager/default.target, Restart=always after 5 s | same |
-| Windows | scheduled task `de.eloyzh.infohub-sync.<clone UUID>`; cached XML under `~/.config/infohub/tasks/` | S4U login trigger plus a one-minute recovery trigger, RestartOnFailure (999 retries), IgnoreNew | same |
+## Lifecycle
 
-Node and Git come from the stable runtime paths in `~/.config/infohub/config.json`. Native definitions preserve Unicode and spaces and construct a minimal PATH. Windows uses a small Node process entry for log redirection and an IPC stop channel; it starts exactly the same foreground CLI with `--parent-stdio`. The task owns retry policy. A periodic native trigger also recovers a dead task when Task Scheduler does not apply RestartOnFailure to the prior execution. `IgnoreNew` leaves a healthy long-running instance untouched, and the clone lease is the final guard. It does not implement another sync loop or infer Git status.
+`brief` attempts one fetch/fast-forward before loading the document library, with a 10-second deadline. It reuses `Client.refresh()` and its existing main-branch, Git-operation, active-process and dirty-path-overlap rules. An occupied daemon PID lease skips this exclusive refresh and reports that the existing loop owns synchronization. Offline, timeout and unsafe skips are reported without blocking the brief. The entry then launches `infohub sync run --on-demand` detached if no loop is alive; `check` does the same launch without the opening fetch. Windows uses a hidden detached process. Neither entry waits for the background loop's first fetch.
 
-Repeat installation retains the clone UUID. An unchanged registration and active process are reused without rewriting its native definition. A changed runtime/root/definition is stopped gracefully before replacement. Previous task identities belonging to a moved clone are retired; copied `.git` metadata cannot claim another clone's task. The clone PID lease still prevents simultaneous loops, including a manually started one. Installation refuses to start another host when an unrelated loop remains active.
+The existing PID lease arbitrates concurrent starts. A losing on-demand process exits successfully. The loop exits only after a successful fetch confirms local HEAD equals remote main, the worktree is clean, and its fingerprint has stayed unchanged for 600 seconds. Git activity in this repository and local changes reset that interval. Ten minutes covers normal Agent thinking and command gaps without keeping a process for an unused login session. The original fetch/draft/auto-commit defaults remain 5/180/1800 seconds. Dirty content and unpublished commits keep the loop alive through draft backup, idle validation, commit and push; failed/offline publication does not count as ready to exit.
 
-Installation checks the native user session and first-use dirty-content guard before retiring the desktop. It reports service readiness only after the same process has completed a successful fetch. An offline repository or inaccessible user service manager is an installation error, not a healthy empty state. Re-run the same installer after correction; do not delete Git locks. First-use uncommitted content still requires an explicit one-time `infohub sync run --include-existing` by someone authorized to let idle content be committed, then Ctrl+C before installation.
-
-## Desktop retirement
-
-The installer detects InfoHub Workbench and old Otterly names in the standard application locations and per-user login registrations. For a running instance it invokes the existing `--quit` single-instance entry, then waits for the application and sync lease to stop. This follows save/cancel, session persistence and Git-child cancellation inside the old application. Cancellation, an old version without this entry, permissions or a shutdown timeout stop migration before deleting the application. Exit from its tray/application menu once and retry. No SIGKILL or Windows `taskkill /F` is used to migrate the application.
-
-After safe exit the installer removes the app bundle/AppImage or invokes the Windows NSIS uninstaller with `/S /KEEPAPPDATA`, and removes its own product's login entries. A system Linux Debian package is removed through its package manager (`sudo -n dpkg --remove info-hub-workbench` if needed); if permission is unavailable, the installer stops for the user to uninstall it. Unknown package installations are not deleted by guessing.
-
-Preferences, registry of vaults, sessions, logs and local caches are retained. This includes the application identifier's user config/data directories (the nested `otterly` state), and `<InfoHub>/.git/infohub-workbench/`. They cannot become sync drafts and can help recover old UI state. The InfoHub clone, its Git metadata, draft identity and user credentials are never removed. The browser owns its new UI settings locally; it does not automatically import desktop sessions.
+For an isolated short exit proof use `infohub sync run --on-demand --exit-after-seconds 2 --fetch-seconds 0.2`. The exit interval is a run-only option, never saved to the clone configuration. Ordinary `sync run` and Docker hosting run continuously. First-time dirty content still requires an explicitly authorized `sync run --include-existing`; installation itself does not authorize auto-committing that content.
 
 ## Status and diagnostics
 
-`infohub sync status` remains version 1. `installed` continues to mean a valid per-clone sync configuration, not a verified OS registration. `manager` is `launchd`, `systemd`, `task-scheduler`, `docker` or `foreground`; it describes the registered/recent owner. The per-clone `.git/infohub-sync/service.json` records the registration location and log path. `running` independently checks the daemon PID lease; registration alone never implies the loop is alive. Network failures remain visible under pending/backoff. `brief` tells a stopped desktop user to check the system user service/log or re-run the installer; it no longer asks for Workbench.
+`infohub sync status` remains version 1 and a read-only filesystem projection. `installed` means the clone has valid sync settings, never an OS registration. `manager` describes the current/most recent process: `on-demand`, `foreground`, or `docker`; an unused local clone defaults to `on-demand`. Old service metadata is no longer a hosting authority. `running` checks the PID lease independently; `running: false` is normal for an idle on-demand clone. Pending errors and last observed unpublished local content remain visible in `brief`; a stopped Docker loop remains a concern. Timestamps and dirty paths describe the last completed observation, not a fresh Git inspection.
 
-Use `infohub sync logs` to locate the log. To diagnose manually, stop the registered host first, run `infohub sync run` in the foreground, stop with Ctrl+C, and re-run the installer to restore the host. Do not run a foreground loop concurrently with the service.
+`infohub sync logs` locates the log. Detached local loops append to `.git/infohub-sync/sync.log`; foreground loops output directly, and servers use `docker logs <container>`. To diagnose manually, wait for idle exit or send SIGTERM to the exact local PID shown by status on macOS/Linux, then run `infohub sync run` in the foreground and stop it with Ctrl+C. On Windows, let an existing detached loop finish before starting a foreground diagnostic loop. There is no service recovery watchdog; the next brief/check starts a stopped loop.
 
-Native stop/start examples (substitute your UUID):
+## Retiring old native hosts
 
-```text
-# macOS: graceful bootout; installer bootstraps again
-launchctl bootout gui/<uid>/de.eloyzh.infohub-sync.<UUID>
-node scripts/install.mjs --root <clone>
+The installer reads the existing clone identity without generating another UUID. It handles only that UUID and its recorded moved-copy predecessors, and refuses to claim registrations copied from a different live clone. It never scans and deletes other clones' tasks.
 
-# Linux: SIGTERM to the main process, which cancels/reaps Git before exit
-systemctl --user stop de.eloyzh.infohub-sync.<UUID>.service
-systemctl --user start de.eloyzh.infohub-sync.<UUID>.service
+- macOS: `launchctl bootout` safely unloads the exact registered LaunchAgent, waits for the daemon lease to stop, then removes `~/Library/LaunchAgents/de.eloyzh.infohub-sync.<UUID>.plist`.
+- Linux: `systemctl --user disable --now` stops and disables the exact unit, waits for the lease, removes `~/.config/systemd/user/de.eloyzh.infohub-sync.<UUID>.service`, then reloads the user manager. A machine without an old unit needs no systemd session.
+- Windows: query the exact UUID task even if its cached XML is absent, disable its triggers, request shutdown through the old running runner's IPC pipe, wait for runner and daemon exit, then delete the task and cached XML. `/End` and forced process termination are never used. An old task that cannot stop safely causes installation to fail before deletion.
 
-# Windows: disable recovery triggers, then stop through IPC, never /End
-node scripts/service-control.mjs --root <clone>
-node scripts/install.mjs --root <clone>
-```
+After safe retirement, obsolete `.git/infohub-sync/service.json` and `service-runner.json` are removed. Identity, settings, logs, draft state and Git locks are retained. Re-running installation creates no new background registration and starts no loop.
 
-macOS needs a logged-in GUI user. Linux needs a working systemd user manager; ordinary login starts the enabled unit, and logging out may stop that user manager unless the administrator intentionally enables linger. The installer does not change linger policy. Windows S4U stores no password and avoids an interactive console, but requires batch-logon permission and noninteractive SSH. EFS/DPAPI-dependent keys or an interactive ssh-agent may be unavailable; the actual first fetch checks that boundary. Do not replace it with a stored account password merely to bypass an error.
+## Desktop retirement
 
-Docker-managed server clones are not migrated by this installer; keep their Compose hosting and run only the relevant server deployment procedure. CI exercises native definition loading and a temporary-repository service lifecycle on each native runner, including PID reuse, crash restart and graceful lease release. CI is not evidence of a user's installed application's save prompts, permissions or login-session behavior.
+The existing retirement path remains: invoke InfoHub Workbench/Otterly's `--quit` single-instance entry, wait for save/cancel handling and sync lease release, then remove its application and known login entries. Cancellation, permissions, an unsupported old build or timeout stops migration before removal; exit through the application's menu and retry. Windows uses its registered NSIS uninstaller with `/S /KEEPAPPDATA`; Linux packages use their package manager. Preferences, vault registry, sessions, logs, caches and `.git/infohub-workbench/` remain. The content repository and credentials are never removed.
+
+## Development and evidence
+
+Use a temporary HOME/USERPROFILE and temporary repositories for all synchronization/installer development and checks. Native boundaries in tests are injected; CI on ubuntu, macOS and Windows runs `npm test` without service registration. Real-machine migration belongs only to final acceptance. CI does not prove a user's login prompts, credentials, application save dialogs or macOS background-items database cleanup.

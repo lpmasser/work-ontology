@@ -39,14 +39,18 @@ test('status uses only files, distinguishes absent configuration from errors, an
   assert.ok((await status(path.join(root, 'missing'))).pending.status);
 });
 
-test('stopped guidance is produced by status manager metadata', async t => {
+test('on-demand idle is normal while a stopped Docker loop requires attention', async t => {
   const { concerns } = await import('./command.mjs');
   const root = await mkdtemp(path.join(tmpdir(), 'infohub-manager-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const home = path.join(root, '.git/infohub-sync');
   await mkdir(home, { recursive: true });
-  assert.equal((await status(root)).manager, 'foreground');
-  assert.ok((await concerns(root)).some(s => s.includes('系统用户服务')));
+  assert.equal((await status(root)).manager, 'on-demand');
+  assert.deepEqual(await concerns(root), []);
+  await writeFile(path.join(home, 'state.json'), JSON.stringify({ manager: 'launchd', pending: {} }));
+  assert.equal((await status(root)).manager, 'on-demand');
+  await writeFile(path.join(home, 'state.json'), JSON.stringify({ manager: 'on-demand', dirtyFiles: ['draft.md'], pending: {} }));
+  assert.ok((await concerns(root)).some(s => s.includes('尚未发布')));
   await writeFile(path.join(home, 'state.json'), JSON.stringify({ manager: 'docker', pending: {} }));
   assert.equal((await status(root)).manager, 'docker');
   assert.ok((await concerns(root)).some(s => s.includes('请检查同步容器')));

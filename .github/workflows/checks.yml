@@ -16,12 +16,4 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci
-      - name: Prepare Linux user service manager
-        if: runner.os == 'Linux'
-        run: |
-          sudo loginctl enable-linger "$(id -un)"
-          sudo systemctl start "user@$(id -u).service"
-          printf 'XDG_RUNTIME_DIR=/run/user/%s\n' "$(id -u)" >> "$GITHUB_ENV"
       - run: npm test
-        env:
-          INFOHUB_TEST_SERVICE: '1'

@@ -2,7 +2,7 @@ import { access, rm, realpath, readFile, readdir, readlink } from 'node:fs/promi
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { run } from '../core/process.mjs';
-import { waitStopped } from './service-control.mjs';
+import { waitStopped } from '../sync/git.mjs';
 
 const products = ['InfoHub Workbench', 'Otterly'];
 const executableName = /^(?:infohub-workbench|otterly|InfoHubWorkbench)(?:\.exe|\.AppImage)?$/i;

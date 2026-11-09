@@ -3,8 +3,9 @@ import path from 'node:path';
 import { Client, context, config, defaults } from './client.mjs';
 import { value, json, save, lease, alive, iso } from './git.mjs';
 
-const managers = ['docker', 'launchd', 'systemd', 'task-scheduler', 'foreground'];
-const manager = () => managers.includes(process.env.INFOHUB_SYNC_MANAGER) ? process.env.INFOHUB_SYNC_MANAGER : 'foreground';
+const managers = ['docker', 'on-demand', 'foreground'];
+const manager = () => managers.includes(process.env.INFOHUB_SYNC_MANAGER) ? process.env.INFOHUB_SYNC_MANAGER : 'on-demand';
+export const ON_DEMAND_IDLE_SECONDS = 600;
 
 // Status is a read-only filesystem snapshot: it must not look like Git activity.
 export async function status(root) {
@@ -30,13 +31,11 @@ export async function status(root) {
       result.settings = Object.fromEntries(Object.entries(defaults).map(([key, fallback]) => [key, settings[key] ?? fallback]));
       if (Object.values(result.settings).some(value => !Number.isFinite(value) || value <= 0)) throw new Error('后台周期必须是正数');
     }
-    const registration = await json(path.join(home, 'service.json'));
-    if (registration && managers.includes(registration.manager)) { result.manager = registration.manager; result.log = registration.log ?? null; }
     const state = await json(path.join(home, 'state.json'), {});
     if (!state || typeof state !== 'object' || Array.isArray(state)) throw new Error('后台状态必须是对象');
     if (state.pending != null && (typeof state.pending !== 'object' || Array.isArray(state.pending) || Object.values(state.pending).some(value => typeof value !== 'string'))) throw new Error('后台 pending 格式无效');
     for (const key of ['log', 'startedAt', 'checkedAt', 'finishedAt', 'idleSince', 'lastFetch', 'lastPull', 'lastDraft', 'lastCommit', 'lastPush', 'lastDraftCleanup', 'draft', 'cleanedDraft']) result[key] = state[key] ?? null;
-    if (managers.includes(state.manager) && !registration) result.manager = state.manager;
+    if (managers.includes(state.manager)) result.manager = state.manager;
     result.backoff = state.backoff || {};
     if (state.clone) {
       const { id, machine, user, root } = state.clone;
@@ -63,7 +62,8 @@ export async function status(root) {
 export async function concerns(root) {
   const s = await status(root);
   const lines = Object.entries(s.pending || {}).map(([kind, reason]) => `InfoHub 同步/${kind}：${reason}`);
-  if (!s.running) lines.push(s.manager === 'docker' ? 'InfoHub 同步：未运行，请检查同步容器' : 'InfoHub 同步：未运行，请检查系统用户服务和同步日志，或重跑安装器');
+  if (!s.running && s.manager === 'docker') lines.push('InfoHub 同步：未运行，请检查同步容器');
+  else if (!s.running && (s.dirtyFiles.length || s.pending.push || s.pending.draft || s.pending.pull)) lines.push('InfoHub 同步：上次观察到尚未发布的本地内容，且循环未运行，请运行 brief 或 check 并检查同步日志');
   if (s.running && Date.now() - Date.parse(s.finishedAt || s.startedAt) > 120000) lines.push('InfoHub 同步：本机状态超过 2 分钟未更新，请检查日志');
   const seenOverlaps = new Set();
   for (const d of s.server?.drafts || []) {
@@ -80,35 +80,42 @@ export async function concerns(root) {
 export async function command(root, args) {
   const action = args[0] || 'status';
   if (action === 'status') { console.log(JSON.stringify(await status(root), null, 2)); return; }
-  if (action === 'logs') { console.log((await status(root)).log || '同步在前台输出日志；系统服务日志见副本 .git/infohub-sync/service.log，服务器请使用 docker logs <同步容器>'); return; }
-  if (action !== 'run') throw new Error('用法: infohub sync run|status|logs。登录机器由系统用户服务托管，服务器由 Docker 托管。');
-  const overrides = {}; let includeExisting = false, parentStdio = false;
+  if (action === 'logs') { console.log((await status(root)).log || '按需同步日志见副本 .git/infohub-sync/sync.log；前台同步直接输出，服务器请使用 docker logs <同步容器>'); return; }
+  if (action !== 'run') throw new Error('用法: infohub sync run|status|logs。brief/check 按需启动本地循环，服务器由 Docker 托管。');
+  const overrides = {}; let includeExisting = false, onDemand = false, exitSeconds = ON_DEMAND_IDLE_SECONDS;
   for (let i = 1; i < args.length; i++) {
     const key = { '--fetch-seconds': 'fetchSeconds', '--draft-seconds': 'draftSeconds', '--idle-seconds': 'idleSeconds' }[args[i]];
     if (args[i] === '--include-existing') includeExisting = true;
-    else if (args[i] === '--parent-stdio') parentStdio = true;
+    else if (args[i] === '--on-demand') onDemand = true;
+    else if (args[i] === '--exit-after-seconds' && args[i + 1]) exitSeconds = Number(args[++i]);
     else if (key && args[i + 1]) overrides[key] = Number(args[++i]);
     else throw new Error(`未知选项或缺少值: ${args[i]}`);
   }
+  if (!Number.isFinite(exitSeconds) || exitSeconds <= 0) throw new Error('exit-after-seconds 必须是正数');
+  if (!onDemand && exitSeconds !== ON_DEMAND_IDLE_SECONDS) throw new Error('--exit-after-seconds 需要 --on-demand');
   const abort = new AbortController();
   const stop = () => abort.abort();
   process.on('SIGTERM', stop); process.on('SIGINT', stop);
-  if (parentStdio) { process.stdin.on('end', stop); process.stdin.on('data', stop); process.stdin.resume(); }
   let release;
   try {
     const ctx = await context(root, abort.signal);
     await mkdir(ctx.home, { recursive: true });
-    release = await lease(path.join(ctx.home, 'daemon.pid'));
+    release = await lease(path.join(ctx.home, 'daemon.pid'), { ifBusy: onDemand });
+    if (!release) return;
     const settings = await config(ctx, overrides);
     if (!await json(path.join(ctx.home, 'config.json')) && !includeExisting
       && await value(ctx, ['status', '--porcelain', '--untracked-files=all'])) throw new Error('首次启用检测到未提交内容；确认允许闲置自动提交后，用 sync run --include-existing 完成首次启用');
     await save(path.join(ctx.home, 'config.json'), settings);
     const client = await Client.open(root, settings, abort.signal);
-    client.state.manager = manager();
+    client.state.manager = process.env.INFOHUB_SYNC_MANAGER === 'docker' ? 'docker' : onDemand ? 'on-demand' : 'foreground';
     client.state.log = process.env.INFOHUB_SYNC_LOG || null;
     await save(path.join(ctx.home, 'state.json'), client.state);
     while (!abort.signal.aborted) {
       await client.tick();
+      if (onDemand && client.state.manager !== 'docker' && client.idleExit(exitSeconds)) {
+        console.log(`${iso()} 本地内容已发布，干净闲置 ${exitSeconds} 秒，退出按需同步`);
+        break;
+      }
       if (!abort.signal.aborted) await new Promise(resolve => {
         const finish = () => { clearTimeout(timer); abort.signal.removeEventListener('abort', finish); resolve(); };
         const timer = setTimeout(finish, settings.fetchSeconds * 1000);
@@ -119,6 +126,5 @@ export async function command(root, args) {
   finally {
     if (release) await release();
     process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop);
-    if (parentStdio) { process.stdin.removeListener('end', stop); process.stdin.removeListener('data', stop); process.stdin.pause(); }
   }
 }

@@ -7,7 +7,7 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { npm } from './npm.mjs';
 import { installCommand } from './install-command.mjs';
-import { ensureSyncService, preflightSyncService } from './sync-service.mjs';
+import { retireSyncService } from './retire-sync-service.mjs';
 import { retireWorkbench } from './retire-workbench.mjs';
 import { normalizeWebUrl, webUsers } from '../core/links.mjs';
 import { git, ensureInfoHub } from './install-source.mjs';
@@ -170,15 +170,14 @@ export async function install(argv = process.argv.slice(2)) {
     step = '读取或克隆 InfoHub'; console.log(`\n[1/4] ${step}`);
     await ensureInfoHub(root, infohubUrl);
     step = '安装 CLI、Skill 和常驻指令'; console.log(`\n[2/4] ${step}`);
-    const runtime = await installCli(root, userHome, infohubUrl, options);
+    await installCli(root, userHome, infohubUrl, options);
     step = '迁移旧桌面工作台'; console.log(`\n[3/4] ${step}`);
-    await preflightSyncService(root);
     await retireWorkbench(root);
-    step = '登记并启动系统同步服务'; console.log(`\n[4/4] ${step}`);
-    await ensureSyncService(root, runtime);
-    console.log(`\n接入已配置。InfoHub：${root}；同步由系统用户服务托管，网页阅读和编辑。`);
+    step = '退役旧系统同步服务'; console.log(`\n[4/4] ${step}`);
+    await retireSyncService(root);
+    console.log(`\n接入已配置。InfoHub：${root}；brief/check 按需启动同步，干净闲置后自行退出；网页阅读和编辑。`);
   } catch (e) {
-    throw new Error(`[${step}] ${e.message}\n修正后重跑同一 install 命令即可；已有副本和同步身份不会被覆盖。同步由系统服务托管；首次已有未提交内容时仍须明确确认。`);
+    throw new Error(`[${step}] ${e.message}\n修正后重跑同一 install 命令即可；已有副本和同步身份不会被覆盖。首次同步时已有未提交内容仍须明确确认。`);
   }
 }
 

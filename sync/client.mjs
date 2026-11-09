@@ -102,6 +102,9 @@ export class Client {
     const state = await json(path.join(ctx.home, 'state.json'), {});
     return new Client(ctx, settings, id, { ...state, clone: id, startedAt: iso(), pending: {} });
   }
+  idleExit(seconds) {
+    return this.published && Date.now() - this.changedAt >= seconds * 1000;
+  }
   tick() {
     if (!this.inFlight) this.inFlight = this.runTick().finally(() => { this.inFlight = null; });
     return this.inFlight;
@@ -125,54 +128,66 @@ export class Client {
       throw new Error(`${error.message}；${backoff[kind].retryAt} 后重试`);
     }
   }
+  // brief and the loop share all fetch/fast-forward safety decisions.
+  async refresh() {
+    const { ctx, state, settings } = this;
+    const pending = state.pending;
+    const fail = (name, error) => { if (!ctx.signal?.aborted) pending[name] = error.message || String(error); };
+    const busy = await gitBusy(ctx);
+    if (busy) { pending.git = busy.reason; if (busy.inRepo) this.changedAt = Date.now(); return null; }
+    if (await value(ctx, ['symbolic-ref', '-q', 'HEAD'], { allowFailure: true }) !== 'refs/heads/main') {
+      pending.git = '当前不在 main，后台暂停'; this.changedAt = Date.now(); return null;
+    }
+    let fetched = false;
+    try {
+      await this.network('fetch', ['fetch', '--no-write-fetch-head', '--no-tags', '--prune', 'origin', `+refs/heads/*:${REMOTE_PREFIX}*`]);
+      state.lastFetch = iso(); fetched = true;
+      const report = await git(ctx, ['show', `${REMOTE_PREFIX}infohub-status:status.json`], { allowFailure: true });
+      state.server = report.code === 0 ? JSON.parse(report.stdout) : null;
+      if (!state.server) pending.server = '服务器草稿状态尚未发布';
+      else if (Date.now() - Date.parse(state.server.checkedAt) > 120000) pending.server = '服务器草稿状态超过 2 分钟未更新';
+    } catch (e) { fail('fetch', e); }
+    let fp = await fingerprint(ctx);
+    const remote = `${REMOTE_PREFIX}main`;
+    if (fetched) {
+      if (!await isAncestor(ctx, fp.head, remote)) pending.pull = '本地有未推送提交或已分叉，本轮不快进';
+      else if (await value(ctx, ['rev-parse', remote]) !== fp.head) {
+        // Explicit overlap check also covers staged edits equal to the incoming blob.
+        const paths = (await git(ctx, ['diff', '--name-only', '-z', fp.head, remote])).stdout.split('\0').filter(Boolean);
+        const overlap = fp.files.filter(a => paths.some(b => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`)));
+        if (overlap.length) { pending.pull = `远端改动碰到本地脏文件: ${overlap.join(', ')}`; state.blockedFiles = overlap; }
+        else {
+          const busy = await gitBusy(ctx);
+          if (busy) { pending.pull = busy.reason; if (busy.inRepo) this.changedAt = Date.now(); }
+          else try {
+            // Disable autostash even when the user's global config enables it.
+            await this.write(async () => {
+              if (settings.workspaceLock && (await fingerprint(ctx)).key !== fp.key) throw new Error('快进前工作区变化，下一轮重试');
+              await git(ctx, ['-c', 'merge.autostash=false', 'merge', '--ff-only', '--no-edit', remote]);
+            });
+            state.lastPull = iso(); state.blockedFiles = [];
+            fp = await fingerprint(ctx);
+          } catch (e) { fail('pull', e); }
+        }
+      } else state.blockedFiles = [];
+    }
+    return { fp, fetched, remote };
+  }
   async runTick() {
     const { ctx, state, settings, id } = this;
     const pending = {}; if (state.pushError) pending.push = state.pushError; if (state.validationError) pending.validation = state.validationError; state.pending = pending; state.checkedAt = iso();
+    this.published = false;
     const fail = (name, error) => { if (!ctx.signal?.aborted) pending[name] = error.message || String(error); };
     try {
-      const busy = await gitBusy(ctx);
-      if (busy) { pending.git = busy.reason; if (busy.inRepo) this.changedAt = Date.now(); return; }
-      if (await value(ctx, ['symbolic-ref', '-q', 'HEAD'], { allowFailure: true }) !== 'refs/heads/main') {
-        pending.git = '当前不在 main，后台暂停'; this.changedAt = Date.now(); return;
-      }
-      let fetched = false;
-      try {
-        await this.network('fetch', ['fetch', '--no-write-fetch-head', '--no-tags', '--prune', 'origin', `+refs/heads/*:${REMOTE_PREFIX}*`]);
-        state.lastFetch = iso(); fetched = true;
-        const report = await git(ctx, ['show', `${REMOTE_PREFIX}infohub-status:status.json`], { allowFailure: true });
-        state.server = report.code === 0 ? JSON.parse(report.stdout) : null;
-        if (!state.server) pending.server = '服务器草稿状态尚未发布';
-        else if (Date.now() - Date.parse(state.server.checkedAt) > 120000) pending.server = '服务器草稿状态超过 2 分钟未更新';
-      } catch (e) { fail('fetch', e); }
-      let fp = await fingerprint(ctx);
-      const remote = `${REMOTE_PREFIX}main`;
-      if (fetched) {
-        if (!await isAncestor(ctx, fp.head, remote)) pending.pull = '本地有未推送提交或已分叉，本轮不快进';
-        else if (await value(ctx, ['rev-parse', remote]) !== fp.head) {
-          // Explicit overlap check also covers staged edits equal to the incoming blob.
-          const paths = (await git(ctx, ['diff', '--name-only', '-z', fp.head, remote])).stdout.split('\0').filter(Boolean);
-          const overlap = fp.files.filter(a => paths.some(b => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`)));
-          if (overlap.length) { pending.pull = `远端改动碰到本地脏文件: ${overlap.join(', ')}`; state.blockedFiles = overlap; }
-          else {
-            const busy = await gitBusy(ctx);
-            if (busy) { pending.pull = busy.reason; if (busy.inRepo) this.changedAt = Date.now(); }
-            else try {
-              // Disable autostash even when the user's global config enables it.
-              await this.write(async () => {
-                if (settings.workspaceLock && (await fingerprint(ctx)).key !== fp.key) throw new Error('快进前工作区变化，下一轮重试');
-                await git(ctx, ['-c', 'merge.autostash=false', 'merge', '--ff-only', '--no-edit', remote]);
-              });
-              state.lastPull = iso(); state.blockedFiles = [];
-              fp = await fingerprint(ctx);
-            } catch (e) { fail('pull', e); }
-          }
-        } else state.blockedFiles = [];
-      }
+      const refreshed = await this.refresh();
+      if (!refreshed) return;
+      const { fp, fetched, remote } = refreshed;
       if (fp.key !== this.lastKey) { this.lastKey = fp.key; this.changedAt = Date.now(); }
       state.idleSince = new Date(this.changedAt).toISOString(); state.dirtyFiles = fp.files;
       const remoteHead = await value(ctx, ['rev-parse', '--verify', remote], { allowFailure: true });
       const ahead = remoteHead && !await isAncestor(ctx, fp.head, remoteHead);
       if (!fp.dirty && remoteHead && !ahead) {
+        this.published = fetched && fp.head === remoteHead;
         delete state.pushError; delete state.rejectedHead; delete pending.push;
         delete state.validationError; delete pending.validation;
         // Only the owning clone knows that its formerly unpublished state has

@@ -343,8 +343,10 @@ test('Agent commit, rejected push, pull merge and later edits retire the owning 
   assert.equal(await value(f.a, ['status', '--porcelain']), '');
   report = await scanDrafts(f.bare, f.server); await restarted.tick();
   assert.equal(report.drafts.length, 0); assert.deepEqual((await status(f.a)).pending, {});
+  // An existing host owns synchronization; brief must not start another loop.
+  await writeFile(path.join(f.a, '.git/infohub-sync/daemon.pid'), String(process.pid));
   const brief = await run(process.execPath, [path.join(repoRoot, 'cli/infohub.mjs'), '--root', f.a, 'brief', 'project-1']);
-  assert.match(brief.stdout.split('需关注:')[1], /系统用户服务/);
+  assert.doesNotMatch(brief.stdout.split('需关注:')[1], /未运行/);
   assert.doesNotMatch(brief.stdout.split('需关注:')[1], /草稿/);
   evidence('superseded-draft-cleaned-by-owning-clone', { head, indexSha256: index, cleanedDraft: restarted.state.cleanedDraft, briefAttention: brief.stdout.split('需关注:')[1].trim() });
 });

@@ -47,8 +47,17 @@ export async function exists(file) {
 export function alive(pid) {
   try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
 }
+export async function waitStopped(root, timeoutMs = 30000) {
+  const file = path.join(root, '.git/infohub-sync/daemon.pid'), deadline = Date.now() + timeoutMs;
+  while (true) {
+    const pid = Number(await readFile(file, 'utf8').catch(error => { if (error.code !== 'ENOENT') throw error; return ''; }));
+    if (!pid || !alive(pid)) return;
+    if (Date.now() >= deadline) throw new Error('同步尚未安全退出；未删除登记或强杀进程，请核对 sync status 后重跑');
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+}
 // Only this application's lease is reclaimed. Git's locks are never removed.
-export async function lease(file) {
+export async function lease(file, { ifBusy = false } = {}) {
   await mkdir(path.dirname(file), { recursive: true });
   for (let n = 0; n < 2; n++) {
     try {
@@ -59,7 +68,10 @@ export async function lease(file) {
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
       const pid = Number(await readFile(file, 'utf8'));
-      if (!pid || alive(pid)) throw new Error(`后台实例仍在运行或锁未写完: ${file}`);
+      if (!pid || alive(pid)) {
+        if (ifBusy) return null;
+        throw new Error(`后台实例仍在运行或锁未写完: ${file}`);
+      }
       await unlink(file);
     }
   }

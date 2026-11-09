@@ -11,6 +11,7 @@ import { checkPaths, selectIssues, annotationIssuesOutsideModel } from '../core/
 import { annotationSummary } from '../core/annotations.mjs';
 import { withObjectUrl, objectLocation, webUsers, normalizeWebUrl } from '../core/links.mjs';
 import { command as syncCommand, concerns } from '../sync/command.mjs';
+import { ensureOnDemand } from '../sync/on-demand.mjs';
 
 const USAGE = `用法: infohub <命令> [参数...]
 
@@ -21,7 +22,7 @@ const USAGE = `用法: infohub <命令> [参数...]
   around <ID或路径>... [--relation <关系>] [--direction outgoing|incoming] 查询关联对象
   get <ID或路径>                                             获取对象路径与全部属性
   check [路径...]                                           校验对象与模型（有错误退出码 1）
-  sync run|status|logs                               运行同步本体或查看状态（托管由系统用户服务 / Docker 负责）
+  sync run|status|logs                               前台同步或查看状态（brief/check 按需启动；服务器由 Docker 托管）
   help                                                     显示帮助信息
 
 选项:
@@ -198,6 +199,10 @@ export async function main(argv = process.argv.slice(2)) {
   const root = path.resolve(cliRoot || config.root);
   await configureRuntime(config);
   if (command === 'sync') { await syncCommand(root, args.slice(1)); return 0; }
+  if (command === 'brief' || command === 'check') {
+    const { reason } = await ensureOnDemand(root, { refresh: command === 'brief' });
+    if (reason) console.error(`InfoHub 同步：${reason}`);
+  }
   const vault = await loadVault(root);
 
   switch (command) {
