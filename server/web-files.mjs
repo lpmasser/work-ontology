@@ -112,9 +112,9 @@ export class Files {
     if (offset !== output.length) throw new HttpError(503, 'SOURCE_UNAVAILABLE', 'Git 批量读取返回多余数据');
     return results;
   }
-  async *contents(selected, maxSize) {
+  async *contents(selected, maxSize, extension) {
     if (!selected.commit) {
-      for (const file of await this.tree(selected)) {
+      for (const file of (await this.tree(selected)).filter(file => !extension || file.path.endsWith(extension))) {
         let bytes = null;
         if (file.size <= maxSize) {
           try { bytes = await this.read(selected, file.path); }
@@ -125,7 +125,7 @@ export class Files {
       return;
     }
     let batch = [], size = 0;
-    for (const file of await this.commitTree(selected)) {
+    for (const file of (await this.commitTree(selected)).filter(file => !extension || file.path.endsWith(extension))) {
       if (size && size + Math.min(file.size, maxSize) > 16 * 1024 * 1024) {
         yield* await this.readBatch(batch, maxSize); batch = []; size = 0;
       }

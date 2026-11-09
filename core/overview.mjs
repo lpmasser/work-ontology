@@ -1,3 +1,6 @@
+import { isISODate, annotationSummary } from './annotations.mjs';
+import { withObjectUrl } from './links.mjs';
+
 import { isUnfinishedWork } from './engine.js';
 
 const STALE_AFTER_DAYS = 7;
@@ -5,10 +8,7 @@ const DELIVERY_WINDOW_DAYS = 14;
 const DAY_MS = 86_400_000;
 
 function dateNumber(value) {
-  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString().slice(0, 10) !== value) return null;
-  return timestamp / DAY_MS;
+  return isISODate(value) ? Date.parse(value) / DAY_MS : null;
 }
 
 function isArchived(path) {
@@ -22,9 +22,15 @@ function byUpdated(a, b) {
     || a.title.localeCompare(b.title, 'zh-CN') || a.id.localeCompare(b.id);
 }
 
-export function buildOverview(index, now = new Date()) {
+export function buildOverview(index, now = new Date(), { webUsers = [], webUrl } = {}) {
   const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()) / DAY_MS;
-  const objects = [...index.objects.values()];
+  const objects = [...index.objects.values()].map(object => withObjectUrl(object, webUrl));
+  const userAuthors = new Set(webUsers), agentAnnotations = new Map();
+  for (const annotation of index.annotations || []) {
+    if (userAuthors.has(annotation.author)) continue;
+    if (!agentAnnotations.has(annotation.path)) agentAnnotations.set(annotation.path, []);
+    agentAnnotations.get(annotation.path).push(annotation);
+  }
   const projects = new Map(objects.filter(object => object.type === 'project')
     .map(project => [project.id, { id: project.id, title: project.title, ongoingCount: 0, deliveredCount: 0, work: [] }]));
   const actions = [];
@@ -36,16 +42,17 @@ export function buildOverview(index, now = new Date()) {
     const unfinished = isUnfinishedWork(object);
     const awaitingDecision = unfinished && fm.requirement === '待澄清';
     const stale = unfinished && fm.progress === '实施中' && age !== null && age > STALE_AFTER_DAYS;
-    // 归档对象已收口，不再作为待处理项
-    if ((fm.attention || awaitingDecision || stale) && !isArchived(object.path)) {
-      const attention = fm.attention ? [...fm.attention] : null;
+    const annotations = object.type === 'work_item' ? agentAnnotations.get(object.path) || [] : [];
+    const blocked = annotations.length > 0;
+    // 归档对象已收口，不再作为待处理项；用户批注不会单独产生待处理项。
+    if ((blocked || awaitingDecision || stale) && !isArchived(object.path)) {
       actions.push({
-        priority: attention ? 0 : awaitingDecision ? 1 : 2,
+        priority: blocked ? 0 : awaitingDecision ? 1 : 2,
         item: {
           object,
-          category: attention ? '卡住了' : awaitingDecision ? '等我拍板' : '停滞',
-          reason: attention
-            ? attention.slice(0, 50).join('') + (attention.length > 50 ? '…' : '')
+          category: blocked ? '卡住了' : awaitingDecision ? '等我拍板' : '停滞',
+          reason: blocked
+            ? annotationSummary(annotations[0].content)
             : awaitingDecision ? '等你拍板：需求待澄清' : `实施中，${age} 天未更新`,
         },
       });
@@ -67,7 +74,7 @@ export function buildOverview(index, now = new Date()) {
 
   return {
     version: 3,
-    references: Object.fromEntries(objects.map(({ id, title, path }) => [id, { title, path }])),
+    references: Object.fromEntries(objects.map(({ id, title, path, url }) => [id, { title, path, ...(url ? { url } : {}) }])),
     needsAction: actions.sort((a, b) => a.priority - b.priority || byUpdated(a.item.object, b.item.object))
       .map(({ item }) => item),
     projects: [...projects.values()].sort((a, b) => a.title.localeCompare(b.title, 'zh-CN') || a.id.localeCompare(b.id)),

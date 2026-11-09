@@ -109,10 +109,10 @@ async function createFixture() {
     'utf8'
   );
 
-  // 能力 (属于项目 1，带 attention)
+  // 能力正文上的批注供 brief 提示，非工作对象不进 overview 的卡住了。
   await writeFile(
     path.join(root, 'docs', 'cap1.md'),
-    '---\nontology_id: "cap-1"\nontology_type: "capability"\ntitle: "核心计算能力"\nproject_id: "project-1"\nattention: "注意内存泄露"\n---\n# 核心计算能力正文\n',
+    '---\nontology_id: "cap-1"\nontology_type: "capability"\ntitle: "核心计算能力"\nproject_id: "project-1"\n---\n# 核心计算能力正文\n<!-- 批注 2026-11-09 agent：注意内存泄露 -->\n',
     'utf8'
   );
 
@@ -238,8 +238,8 @@ test('brief outputs all 4 sections with correct filtering rules', async () => {
     assert.ok(!res.stdout.includes('相关知识:'));
     assert.ok(!res.stdout.includes('校验要放在高成本之前'));
 
-    // ⑤ 需关注: cap-1 (attention: 注意内存泄露)
-    assert.ok(res.stdout.includes('核心计算能力：注意内存泄露 — docs/cap1.md'));
+    // ⑤ 需关注: 本项目有正文批注的能力
+    assert.ok(res.stdout.includes('核心计算能力：1 条批注；注意内存泄露 — docs/cap1.md'));
 
     // 2. 通过 title 精确匹配
     const resTitle = await runCli(['--root', root, 'brief', 'Alpha项目']);
@@ -427,10 +427,11 @@ test('desktop queries share find semantics and expose issues without parsing tex
     assert.ok(plain.stdout.includes(`共 ${snapshot.objects.length} 个对象`));
     assert.equal(snapshot.objects[0].frontmatter.progress, '实施中');
     assert.ok(snapshot.issues.some(issue => issue.path === 'docs/bad.md'));
-    const attention = JSON.parse((await runCli(['--root', root, 'find', '--has', 'attention', '--json'])).stdout);
-    assert.deepEqual(attention.objects.map(o => o.path), ['docs/cap1.md']);
-    await rm(path.join(root, 'docs', 'cap1.md'));
-    assert.deepEqual(JSON.parse((await runCli(['--root', root, 'find', '--has', 'attention', '--json'])).stdout).objects, []);
+    const nonempty = JSON.parse((await runCli(['--root', root, 'find', '--has', 'use_when', '--json'])).stdout);
+    assert.deepEqual(nonempty.objects.map(o => o.path), ['docs/method1.md', 'docs/std1.md']);
+    await rm(path.join(root, 'docs', 'method1.md'));
+    await rm(path.join(root, 'docs', 'std1.md'));
+    assert.deepEqual(JSON.parse((await runCli(['--root', root, 'find', '--has', 'use_when', '--json'])).stdout).objects, []);
     assert.equal((await runCli(['--root', root, 'find', '--typo', '--json'])).code, 1);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -447,7 +448,7 @@ test('overview projects share unfinished find semantics, expose action items and
     assert.equal(overview.version, 3);
     assert.deepEqual(overview.projects.flatMap(project => project.work), found.objects);
     assert.deepEqual(overview.projects.map(project => project.ongoingCount), [2, 0]);
-    assert.deepEqual(overview.needsAction.map(item => item.object.id), ['cap-1', 'work-2']);
+    assert.deepEqual(overview.needsAction.map(item => item.object.id), ['work-2']);
     assert.deepEqual(overview.issues, found.issues);
     await rm(path.join(root, 'docs', 'work2.md'));
     await rm(path.join(root, 'docs', 'cap1.md'));
@@ -474,12 +475,13 @@ test('check resolves cwd-relative and absolute paths and rejects missing, outsid
     assert.match(result.stdout, /YAML 解析失败/);
   }
   await writeFile(path.join(root, 'outside.md'), '# outside model');
-  for (const input of [path.join(root, 'missing.md'), path.join(root, 'outside.md'), import.meta.filename]) {
+  for (const input of [path.join(root, 'missing.md'), import.meta.filename]) {
     const result = await runCli(['--root', root, 'check', input]);
     assert.equal(result.code, 1);
     assert.ok(result.stderr);
     assert.ok(!result.stdout.includes('无问题'));
   }
+  assert.equal((await runCli(['--root', root, 'check', path.join(root, 'outside.md')])).code, 0);
   const model = await runCli(['--root', root, 'check', path.join(root, 'ontology/ontology.json')]);
   assert.equal(model.code, 1);
   assert.match(model.stdout, /docs\/bad.md/);
@@ -512,4 +514,33 @@ test('subprocess flushes large UTF-8 JSON to a pipe before exit', async t => {
   assert.ok(bytes.length > 65536);
   const result = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
   assert.equal(result.projects.find(o => o.id === 'large').title, title);
+});
+
+test('configured links cover CLI text/JSON and brief annotations; webUser excludes only user notes from blocked work', async t => {
+  const root = await createFixture(), home = await mkdtemp(path.join(tmpdir(), 'links-home-'));
+  t.after(() => Promise.all([root, home].map(p => rm(p, { recursive: true, force: true }))));
+  await mkdir(path.join(home, '.config/infohub'), { recursive: true });
+  await writeFile(path.join(home, '.config/infohub/config.json'), JSON.stringify({ root, webUrl: 'https://infohub.example.test/', webUser: ['alice', 'bob'] }));
+  const workFile = path.join(root, 'docs/work1.md');
+  const original = await (await import('node:fs/promises')).readFile(workFile, 'utf8');
+  await writeFile(workFile, original + '\n<!-- 批注 2026-11-09 alice：给 Agent -->\n<!-- 批注 2026-11-09 bob: 另一个用户 -->\n');
+  for (const args of [['find', '--type', 'project'], ['get', 'project-1'], ['around', 'work-1']]) {
+    const result = await runCli(args, home); assert.equal(result.code, 0); assert.match(result.stdout, /https:\/\/infohub.example.test\/o\/project-1/);
+    const snapshot = JSON.parse((await runCli([...args, '--json'], home)).stdout);
+    const object = snapshot.object || snapshot.objects?.find(o => o.id === 'project-1') || snapshot.groups.flatMap(g => g.objects).find(o => o.id === 'project-1');
+    assert.equal(object.url, 'https://infohub.example.test/o/project-1');
+  }
+  const brief = await runCli(['brief', 'project-1'], home);
+  assert.match(brief.stdout, /重构引擎：2 条批注；给 Agent — docs\/work1.md — https:\/\/infohub.example.test\/o\/work-1/);
+  assert.match(brief.stdout, /核心计算能力：1 条批注/);
+  let overview = JSON.parse((await runCli(['overview'], home)).stdout);
+  assert.ok(!overview.needsAction.some(item => item.category === '卡住了'));
+  await writeFile(workFile, original + '\n<!-- 批注 2026-11-09 alice：给 Agent -->\n<!-- 批注 2026-11-09 GPT-6.1 Sol：请用户拍板 -->\n');
+  overview = JSON.parse((await runCli(['overview'], home)).stdout);
+  assert.equal(overview.needsAction[0].category, '卡住了'); assert.equal(overview.needsAction[0].reason, '请用户拍板');
+  assert.equal(overview.needsAction[0].object.url, 'https://infohub.example.test/o/work-1');
+  assert.equal(overview.references['work-1'].url, 'https://infohub.example.test/o/work-1');
+  const outside = path.join(root, 'outside.md');
+  await writeFile(outside, '<!-- 批注 2026-02-30 agent：bad -->\n');
+  const checked = await runCli(['check', outside], home); assert.equal(checked.code, 1); assert.match(checked.stdout, /第 1 行批注格式错误.*日期/);
 });

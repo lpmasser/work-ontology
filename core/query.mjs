@@ -1,4 +1,5 @@
 import { searchAround } from './engine.js';
+import { withObjectUrl } from './links.mjs';
 
 export function resolveObjectId(index, target) {
   target = target.replaceAll('\\', '/');
@@ -25,7 +26,7 @@ export function filterObjects(vault, { type, projectId, whereClauses = [], exclu
   });
 }
 
-export function queryFind(vault, args) {
+export function queryFind(vault, args, { webUrl } = {}) {
   const options = { whereClauses: [], excludedClauses: [], requiredFields: [] }, words = [];
   let json = false;
   for (let i = 0; i < args.length; i++) {
@@ -47,17 +48,17 @@ export function queryFind(vault, args) {
   }
   options.text = words.join(' ');
   if (!options.type && !options.projectId && !options.whereClauses.length && !options.excludedClauses.length && !options.requiredFields.length && !options.text) throw new Error('find 命令必须至少提供一个条件（文本、--type、--project、--where）');
-  return { json, snapshot: { version: 1, objects: filterObjects(vault, options), issues: vault.index.issues } };
+  return { json, snapshot: { version: 1, objects: filterObjects(vault, options).map(object => withObjectUrl(object, webUrl)), issues: vault.index.issues } };
 }
 
-export function queryGet(vault, target) {
+export function queryGet(vault, target, { webUrl } = {}) {
   if (!target) throw new Error('get 命令缺少 ID 或路径参数');
   const id = resolveObjectId(vault.index, target);
   if (!id) throw new Error(`找不到对象: ${target}`);
-  return { version: 1, object: vault.index.objects.get(id), issues: vault.index.issues };
+  return { version: 1, object: withObjectUrl(vault.index.objects.get(id), webUrl), issues: vault.index.issues };
 }
 
-export function queryAround(vault, args) {
+export function queryAround(vault, args, { webUrl } = {}) {
   const targets = [];
   let relation, direction = 'both';
   for (let i = 0; i < args.length; i++) {
@@ -80,5 +81,7 @@ export function queryAround(vault, args) {
     if (!id) throw new Error(`找不到起点对象: ${target}`);
     return id;
   });
-  return { version: 1, ...searchAround(vault.index, vault.model, { ids, relation, direction }) };
+  const result = searchAround(vault.index, vault.model, { ids, relation, direction });
+  return { version: 1, ...result, from: result.from.map(object => withObjectUrl(object, webUrl)),
+    groups: result.groups.map(group => ({ ...group, objects: group.objects.map(object => withObjectUrl(object, webUrl)) })) };
 }

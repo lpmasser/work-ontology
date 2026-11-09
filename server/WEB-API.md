@@ -135,6 +135,47 @@
 
 任一条件不符为 409，错误中的 `path` 指明冲突的是源还是目标；双方文件保持原样。只移动普通文件，父目录自动创建，不支持移动目录。
 
+## 批注与对象链接
+
+规范批注单独成行，位于正文（整篇批注放在一级标题后）：
+
+```markdown
+<!-- 批注 2026-11-09 lpmasser：这里需要核实 -->
+
+<!-- 批注 2026-11-09 GPT-6.1 Sol：第一行
+第二行 -->
+```
+
+写入统一使用全角 `：`；解析也接受半角 `:`。日期是有效日历日期 `YYYY-MM-DD`，作者必须非空、不能跨行或包含冒号；作者可有内部空格。内容非空、可多行，不能嵌套 HTML 注释或包含 `-->`。开始标记前和闭合标记后只允许行内空白，禁止把批注塞在正文行中。前后空白从作者和内容的返回值裁掉，内部换行归一为 `\n`，磁盘原字节始终不改。普通 HTML 注释和 fenced code（至少三个反引号或波浪线，闭合符须同字符且不少于开头长度）中的样例不算批注；YAML 属性头和嵌在正文行内的示例不算正文批注。
+
+`infohub check`、提交前校验与服务器推送校验共用 core：未闭合、日期非法、缺作者/分隔冒号、空内容或闭合标记后还有正文均报带路径/行号的问题。模型目录内文档按现有范围整体校验，模型目录外显式指定或推送改动的 Markdown 也会校验批注格式。列表保留其他合法批注，并把坏格式列在 issues，不把非法批注当作有效记录。
+
+### `GET /api/annotations?source=workspace`
+
+需要会话，source 同样支持 `workspace` / `main` / `draft:<id>`。扫描指定来源全部可见 Markdown（包括没有属性头的普通文档和模型目录外的文件），不读取其他用户工作区。返回：
+
+```json
+{"version":1,"source":"workspace","commit":null,"annotations":[
+  {"path":"docs/a.md","objectId":"work_item-12345678","title":"示例工作","line":12,"endLine":13,"date":"2026-11-09","author":"lpmasser","content":"第一行\n第二行"}
+],"issues":[]}
+```
+
+`path` 是库内原路径。`objectId` 来自文档头的 ontology_id，`title` 来自 title；没有对应字符串时为 null。它们是文档声明的元数据，不证明对象唯一有效；对象解析错误仍由查询接口的 issues 提供。`line` / `endLine` 为完整原文件的 1 起始行号（包含 YAML 与 BOM，闭合行包含在内），可定位标记/选择范围；不是稳定批注 ID。按路径再按出现顺序返回。列表字段 content 是解析后的展示文本，**不要用它重新序列化未改正文**。
+
+批注新增/删除仍用现有带版本条件 PUT 原文，未提供独立写接口。删除前先以原文件和当前 ETag 确认行号与作者；列表可能落后于文件，不得拿旧行号直接删新文件。普通文件变更 SSE 已覆盖批注，前端收到相关变化或 ready/reset 时刷新列表。只读来源在请求中固定 commit；workspace 与搜索一样不是多文件事务，遇到并发删除/读取失败返回 503 让客户端重读。Git 读取沿用单次输出 64 MiB 上限。
+
+### overview 和 brief 的作者规则
+
+Web overview 的“卡住了”只由工作对象（work_item）上的 **非用户批注** 触发：作者精确匹配服务器用户表任一 username 时视为用户本人，其批注不会触发“卡住了”。不是只比当前登录用户。其他非用户作者视为 Agent/来源。原有归档过滤、待澄清和停滞规则继续，所以用户批注不会消除同一工作本来就有的待澄清/停滞提醒。非工作对象的批注只在批注列表和 CLI brief 中显示。overview v3 的外层形状保持；卡住了的 reason 是第一条非用户批注的内容摘要（50 个 Unicode 字符，多行压成空格）。不再读取 frontmatter attention，没有兼容路径。
+
+CLI 从 `~/.config/infohub/config.json` 的可选 `webUser`（单个用户名或用户名数组）取得相同排除集合；缺省为空，全部作者按非用户处理，不猜系统用户名。用安装器 `--web-user lpmasser` 设置；多用户本地配置可写数组。`brief` 的“需关注”包含本项目及项目本身的全部有批注对象，不按作者过滤，每行标题、条数、第一条摘要、路径及已配置网页链接。
+
+### 深链接
+
+`/o/<ontology_id>` 与 `/f/<path>` 由前端解析；服务端静态托管返回同一个 index.html，支持中文、空格、字面百分号的 URL 编码，查询 `source` 与 `#标题` 由前端保留。`/f/` 的任一以点开头路径段仍拒绝，含 `%2e` 编码也不会绕过。对象还没同步等业务状态由前端查询后展示，SPA fallback 的 HTTP 200 不证明该对象存在。
+
+Web 的 find/get/around 返回的每个 Object/ObjectInfo 都增加 `url: <origin>/o/<encodeURIComponent(id)>`；overview 的工作对象及 references 也提供 url。CLI 配置可选 `webUrl` 后，find/get/around 的 JSON 采用同样字段，文本和 brief 各对象处附链接；没配置不增加字段或空 url。CLI 用 `node scripts/install.mjs --web-url https://infohub.example.com --web-user alice` 设置，重复安装保留。webUrl 只接受不含凭据、查询、fragment 的 HTTP(S) 基地址，尾斜杠去掉；对象 ID 按单个路径段编码。
+
 ## 全文搜索
 
 ### `GET /api/search?source=main&q=关键词&limit=100`

@@ -1,6 +1,6 @@
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
-import YAML from 'yaml';
+import { inspectMarkdown } from './annotations.mjs';
 import { validateModel, buildIndex } from './engine.js';
 
 async function collectMarkdownFiles(dir) {
@@ -46,28 +46,19 @@ export async function loadVault(root) {
     allFiles.push(...folderFiles);
   }
 
-  const notes = [];
-  const yamlIssues = [];
+  const notes = [], annotations = [], documentIssues = [];
 
   for (const filePath of allFiles) {
     const relPath = path.relative(root, filePath).split(path.sep).join('/');
     const text = await readFile(filePath, 'utf8');
-    const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)([\s\S]*)$/);
-    if (!match) continue;
-
-    let fm;
-    try {
-      fm = YAML.parse(match[1]);
-    } catch (err) {
-      yamlIssues.push({ path: relPath, message: `YAML 解析失败: ${err.message}` });
-      continue;
-    }
-
-    notes.push({ path: relPath, frontmatter: fm, body: match[2] });
+    const parsed = inspectMarkdown(text, relPath);
+    annotations.push(...parsed.annotations); documentIssues.push(...parsed.issues);
+    if (parsed.frontmatter !== null) notes.push({ path: relPath, frontmatter: parsed.frontmatter, body: parsed.body });
   }
 
   const index = buildIndex(notes, model);
-  index.issues.push(...yamlIssues);
+  index.issues.push(...documentIssues);
+  index.annotations = annotations;
 
   return { model, index, notes };
 }

@@ -203,6 +203,17 @@ test('pre-receive 钩子测试', async (t) => {
   assert.equal(pushTxt.status, 0);
   assert.equal(requestCount, countBeforeTxt + 1);
 
+  // 批注协议也由真实 pre-receive -> validator 链路拒收，且 main 不前进。
+  const headBeforeAnnotation = await runGit(['rev-parse', 'main'], bareRepo);
+  await writeFile(path.join(workRepo, 'plain.md'), '<!-- 批注 2026-02-30 agent：无效日期 -->\n');
+  await runGit(['add', '.'], workRepo); await runGit(['commit', '-m', 'invalid annotation'], workRepo);
+  const badAnnotation = await runGit(['push', 'origin', 'main'], workRepo);
+  assert.notEqual(badAnnotation.status, 0); assert.match(badAnnotation.stderr, /批注格式错误.*日期/);
+  assert.equal((await runGit(['rev-parse', 'main'], bareRepo)).stdout, headBeforeAnnotation.stdout);
+  await writeFile(path.join(workRepo, 'plain.md'), '<!-- 批注 2024-02-29 agent：合法闰日 -->\n');
+  await runGit(['add', '.'], workRepo); await runGit(['commit', '-m', 'correct annotation'], workRepo);
+  assert.equal((await runGit(['push', 'origin', 'main'], workRepo)).status, 0);
+
   // 7. 测试 ②: 属性缺失的改动被拒，stderr 含问题行
   await writeFile(
     path.join(workRepo, 'docs', 'broken-main.md'),

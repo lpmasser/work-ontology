@@ -29,3 +29,7 @@ npm test
 ```
 
 Maintainers: see [AGENTS.md](AGENTS.md). Licensed under [MIT](LICENSE).
+
+Use `node scripts/install.mjs --web-url https://your-infohub.example --web-user alice` to save the browser address and your exact Web username. The installer retains them on later runs. Object listings include `/o/<ontology_id>` links when configured; JSON objects also have `url`. Local overview uses `webUser` (or a username array edited in the user config) to exclude users' own annotations from blocked-work reminders; it never guesses from the OS username.
+
+Annotations are standalone body comments, `<!-- 批注 YYYY-MM-DD author：content -->`, with multiline content allowed. Core owns their parsing and validation; fenced code examples and frontmatter are ignored. Project `brief` lists all annotated objects. Overview's blocked work comes from Agent annotations, with no `attention` field fallback. See [the API contract](server/WEB-API.md) for source lists, line positions, format errors and `/api/annotations`.

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { parseAnnotations } from './annotations.mjs';
 import { buildOverview } from './overview.mjs';
 
 const now = new Date(2026, 9, 26, 23, 30);
@@ -9,44 +10,40 @@ function object(id, type, frontmatter = {}) {
 function work(id, frontmatter = {}) {
   return object(id, 'work_item', { project_id: 'p', requirement: '已明确', progress: '实施中', ...frontmatter });
 }
-function overview(objects, issues = []) {
-  return buildOverview({ objects: new Map(objects.map(item => [item.id, item])), issues }, now);
+function overview(objects, issues = [], annotations = [], webUsers = []) {
+  return buildOverview({ objects: new Map(objects.map(item => [item.id, item])), issues, annotations }, now, { webUsers });
 }
+const annotation = (id, content, author = 'agent') => ({ path: `${id}.md`, content, author });
 
-test('action items prioritize explicit attention, pending decisions, then stale work without repeating objects', () => {
+test('action items prioritize Agent work annotations, then pending decisions and stale work', () => {
   const result = overview([
     work('stale', { updated: '2026-10-01' }),
     work('decision-new', { requirement: '待澄清', updated: '2026-10-20' }),
     work('decision-old', { requirement: '待澄清', updated: '2026-10-02' }),
-    work('overlap', { requirement: '待澄清', updated: '2026-10-18', attention: '等待外部决定' }),
-    object('attention-old', 'capability', { updated: '2026-10-10', attention: '接口有问题' }),
-    work('done-with-attention', { requirement: '待澄清', progress: '已交付', updated: '2026-10-25', attention: '尚待现场验证' }),
+    work('overlap', { requirement: '待澄清', updated: '2026-10-18' }),
+    object('annotated-capability', 'capability', { updated: '2026-10-10' }),
+    work('done-annotated', { requirement: '待澄清', progress: '已交付', updated: '2026-10-25' }),
+    work('user-only', { updated: '2026-10-25' }),
+    work('mixed', { updated: '2026-10-26' }),
     work('cancelled', { requirement: '待澄清', progress: '已取消', updated: '2026-01-01' }),
     work('done', { requirement: '待澄清', progress: '已交付', updated: '2026-01-01' }),
-  ]);
+  ], [], [annotation('overlap', '等待外部决定'), annotation('annotated-capability', '接口有问题'),
+    annotation('done-annotated', '尚待现场验证'), annotation('user-only', '给 Agent 的话', 'alice'),
+    annotation('mixed', '用户不进 reason', 'bob'), annotation('mixed', 'Agent 报告的问题')], ['alice', 'bob']);
   assert.equal(result.version, 3);
   assert.deepEqual(result.needsAction.map(item => [item.object.id, item.category]), [
-    ['attention-old', '卡住了'], ['overlap', '卡住了'], ['done-with-attention', '卡住了'],
+    ['overlap', '卡住了'], ['done-annotated', '卡住了'], ['mixed', '卡住了'],
     ['decision-old', '等我拍板'], ['decision-new', '等我拍板'], ['stale', '停滞'],
   ]);
   assert.equal(result.needsAction.find(item => item.object.id === 'overlap').reason, '等待外部决定');
+  assert.equal(result.needsAction.find(item => item.object.id === 'mixed').reason, 'Agent 报告的问题');
 });
 
-test('archived objects never need action, whatever their attention or progress says', () => {
-  const archived = (id, frontmatter) => {
-    const item = work(id, frontmatter);
-    item.path = `工作/archive/${id}.md`;
-    return item;
-  };
-  const note = object('archived-note', 'material', { updated: '2026-10-01', attention: '内容失效' });
-  note.path = '附属资料/archive/note.md';
-  const result = overview([
-    archived('archived-stale', { updated: '2026-01-01' }),
-    archived('archived-attention', { progress: '已交付', updated: '2026-10-25', attention: '发包标识待确定' }),
-    archived('archived-decision', { requirement: '待澄清', updated: '2026-01-01' }),
-    note,
-    work('live-stale', { updated: '2026-10-01' }),
-  ]);
+test('archived objects never need action, whatever their annotations or progress say', () => {
+  const item = work('archived', { requirement: '待澄清', updated: '2026-01-01' });
+  item.path = '工作/archive/archived.md';
+  const annotations = parseAnnotations('<!-- 批注 2026-10-25 agent：旧批注 -->', { path: item.path }).annotations;
+  const result = overview([item, work('live-stale', { updated: '2026-10-01' })], [], annotations);
   assert.deepEqual(result.needsAction.map(item => item.object.id), ['live-stale']);
 });
 
@@ -75,16 +72,22 @@ test('calendar-day boundaries exclude exactly seven stale days and include deliv
   });
 });
 
-test('attention keeps its original prefix and full source; unknown dates sort last without creating stale claims', () => {
-  const attention = '待核实😀'.repeat(20);
+test('Agent annotation keeps its full source; unknown dates sort last without creating stale claims', () => {
+  const content = '待核实😀'.repeat(20);
   const result = overview([
-    object('unknown', 'material', { attention }),
-    object('dated', 'material', { attention: '先处理', updated: '2026-10-25' }),
+    work('unknown'), work('dated', { updated: '2026-10-25' }),
     work('missing-date'), work('bad-date', { updated: 'yesterday' }),
-  ]);
+  ], [], [annotation('unknown', content), annotation('dated', '先处理')]);
   assert.deepEqual(result.needsAction.map(item => item.object.id), ['dated', 'unknown']);
-  assert.equal(result.needsAction[1].reason, [...attention].slice(0, 50).join('') + '…');
-  assert.equal(result.needsAction[1].object.frontmatter.attention, attention);
+  assert.equal(result.needsAction[1].reason, [...content].slice(0, 50).join('') + '…');
+});
+
+test('user-only annotations do not suppress other action rules and old metadata has no compatibility path', () => {
+  const result = overview([
+    work('user-decision', { requirement: '待澄清' }), work('user-stale', { updated: '2026-01-01' }),
+    work('old-field', { attention: 'obsolete' }),
+  ], [], [annotation('user-decision', 'note', 'alice'), annotation('user-stale', 'note', 'alice')], ['alice']);
+  assert.deepEqual(result.needsAction.map(item => [item.object.id, item.category]), [['user-decision', '等我拍板'], ['user-stale', '停滞']]);
 });
 
 test('unresolved project references retain work alongside the index issue instead of dropping it', () => {

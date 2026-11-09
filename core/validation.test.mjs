@@ -100,6 +100,20 @@ test('validateTree: 模型无效时原样抛错', async () => {
   }
 });
 
+test('annotation errors are enforced in plain/model documents and changed Markdown outside model folders', async t => {
+  const root = await createFixtureVault();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(path.join(root, 'docs/plain.md'), '# Plain\n<!-- 批注 2026-11-09 ：缺作者 -->');
+  await writeFile(path.join(root, 'outside.md'), '<!-- 批注 2026-02-30 agent：bad -->');
+  let issues = await validateTree(root, ['docs/plain.md', 'outside.md']);
+  assert.equal(issues.length, 2); assert.ok(issues.every(i => i.line > 0));
+  assert.match(issues.find(i => i.path === 'docs/plain.md').message, /作者/);
+  assert.match(issues.find(i => i.path === 'outside.md').message, /日期/);
+  await writeFile(path.join(root, 'docs/plain.md'), '# Plain\n<!-- 批注 2026-11-09 agent：ok -->');
+  assert.deepEqual(await validateTree(root, ['docs/plain.md']), []);
+  assert.deepEqual(await validateTree(root, ['deleted.md']), []);
+});
+
 test('model changes validate all documents; unrelated files do not load the model', async t => {
   const root = await createFixtureVault();
   t.after(() => rm(root, { recursive: true, force: true }));

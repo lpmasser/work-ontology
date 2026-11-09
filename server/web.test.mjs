@@ -1,3 +1,4 @@
+import http from 'node:http';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promises';
@@ -169,7 +170,10 @@ test('authentication, path boundary, full text and JSON query parity with CLI', 
     ['/api/sync/status?source=workspace', ['sync', 'status']],
   ]) {
     const api = await f.request(route); assert.equal(api.status, 200);
-    const cli = await run('node', [path.resolve(import.meta.dirname, '../cli/infohub.mjs'), '--root', f.workspace, ...cliArgs]);
+    const cliHome = path.join(f.home, 'cli-home');
+    await mkdir(path.join(cliHome, '.config/infohub'), { recursive: true });
+    await writeFile(path.join(cliHome, '.config/infohub/config.json'), JSON.stringify({ webUrl: origin, webUser: ['lpmasser', 'second'] }));
+    const cli = await run('node', [path.resolve(import.meta.dirname, '../cli/infohub.mjs'), '--root', f.workspace, ...cliArgs], { env: { HOME: cliHome, USERPROFILE: cliHome } });
     assert.deepEqual(await api.json(), JSON.parse(cli.stdout));
   }
   evidence('http-cli-json-parity', { queries: ['find v1', 'get v1', 'around v1', 'overview v3', 'sync status v1'], unauthenticated: 401 });
@@ -183,7 +187,7 @@ test('optional static directory serves live assets and SPA routes while API rema
   const index = await fetch(f.base + '/');
   assert.equal(index.status, 200); assert.match(index.headers.get('content-type'), /^text\/html/);
   const html = await index.text(); assert.match(html, /Static fixture/);
-  for (const route of ['/projects/one', '/projects/one/', '/assets/missing.js']) {
+  for (const route of ['/projects/one', '/projects/one/', '/assets/missing.js', '/o/work-1', '/f/中文/100%25%20说明.md', '/f/%E4%B8%AD%E6%96%87/%E6%96%87%E6%A1%A3.md']) {
     const response = await fetch(f.base + route); assert.equal(response.status, 200); assert.equal(await response.text(), html);
   }
   const js = await fetch(f.base + '/assets/app.js'), version = js.headers.get('etag');
@@ -196,7 +200,14 @@ test('optional static directory serves live assets and SPA routes while API rema
   assert.equal((await fetch(f.base + '/api')).status, 401);
   const unknownAPI = await f.request('/api/no-such-route?source=workspace'); assert.equal(unknownAPI.status, 404); assert.equal((await unknownAPI.json()).error.code, 'NOT_FOUND');
   assert.deepEqual(await (await fetch(f.base + '/health')).json(), { ok: true });
-  for (const route of ['/assets/%2e%2e%2fsecret', '/assets/%5csecret', '/.env']) assert.equal((await fetch(f.base + route)).status, 400);
+  for (const route of ['/assets/%2e%2e%2fsecret', '/assets/%5csecret', '/.env', '/f/.git/config', '/f/%2eassets/image.png', '/f/docs/%2eprivate.md']) assert.equal((await fetch(f.base + route)).status, 400);
+  for (const rawPath of ['/f/../private.md', '/f/%2e%2e/private.md', '/f/docs/%2e/private.md']) {
+    const code = await new Promise((resolve, reject) => {
+      const req = http.get(f.base + '/', { path: rawPath }, res => { res.resume(); resolve(res.statusCode); });
+      req.on('error', reject);
+    });
+    assert.equal(code, 400);
+  }
   if (process.platform !== 'win32') {
     await symlink(path.join(f.home, 'workspace'), path.join(f.staticDir, 'escape'));
     assert.equal((await fetch(f.base + '/escape/raw.txt')).status, 403);
@@ -204,6 +215,32 @@ test('optional static directory serves live assets and SPA routes while API rema
   await rm(path.join(f.staticDir, 'index.html'));
   assert.equal((await fetch(f.base + '/missing-spa-route')).status, 404);
   console.log(JSON.stringify({ scenario: 'live-static-SPA', root: 200, asset: 200, fallback: 200, conditional: 304, liveAssetUpdate: true, protectedAPI: 401, apiFallback: false }));
+});
+
+test('annotations list uses the same parser on workspace/main/drafts including plain files; overview ignores all user authors', async t => {
+  const f = await fixture(t, true);
+  const target = path.join(f.workspace, 'docs/work.md'), original = await readFile(target, 'utf8');
+  await writeFile(target, original + '<!-- 批注 2026-11-09 lpmasser：user one -->\n<!-- 批注 2026-11-09 second: user two -->\n');
+  let overview = await (await f.request('/api/overview?source=workspace')).json();
+  assert.ok(!overview.needsAction.some(item => item.category === '卡住了'));
+  await writeFile(target, original + '<!-- 批注 2026-11-09 lpmasser：user one -->\n<!-- 批注 2026-11-09 second: user two -->\n<!-- 批注 2026-11-09 GPT-6.1 Sol：Agent 的问题\n多行 -->\n');
+  await writeFile(path.join(f.workspace, '普通 100%.md'), '# plain\n<!-- 批注 2026-11-09 lpmasser：plain -->\n```md\n<!-- 批注 invalid -->\n```\n<!-- 批注 2026-02-30 agent：invalid -->\n');
+  await git(f.workspace, ['add', '.']); await git(f.workspace, ['commit', '-m', 'annotation snapshot']);
+  await git(f.workspace, ['push', 'origin', 'HEAD:refs/heads/infohub-drafts/annotations-fixture']); await f.client.tick();
+  const workspace = await (await f.request('/api/annotations?source=workspace')).json();
+  assert.equal(workspace.version, 1); assert.equal(workspace.annotations.length, 4); assert.equal(workspace.issues.length, 1);
+  const note = workspace.annotations.find(a => a.author === 'GPT-6.1 Sol');
+  assert.deepEqual(note, { path: 'docs/work.md', objectId: 'work-1', title: 'Work', line: 11, endLine: 12, date: '2026-11-09', author: 'GPT-6.1 Sol', content: 'Agent 的问题\n多行' });
+  const plain = workspace.annotations.find(a => a.path === '普通 100%.md'); assert.equal(plain.objectId, null); assert.equal(plain.line, 2);
+  const draft = await (await f.request('/api/annotations?source=draft:annotations-fixture')).json();
+  assert.deepEqual(draft.annotations, workspace.annotations); assert.deepEqual(draft.issues, workspace.issues); assert.ok(draft.commit);
+  assert.deepEqual((await (await f.request('/api/annotations?source=main')).json()).annotations, []);
+  overview = await (await f.request('/api/overview?source=workspace')).json();
+  assert.equal(overview.needsAction[0].reason, 'Agent 的问题 多行'); assert.equal(overview.needsAction[0].category, '卡住了');
+  assert.equal(overview.needsAction[0].object.url, origin + '/o/work-1');
+  assert.equal((await fetch(f.base + '/api/annotations?source=workspace')).status, 401);
+  assert.equal((await f.request('/api/annotations')).status, 400);
+  console.log(JSON.stringify({ scenario: 'annotations-three-sources', workspace: 4, draft: 4, main: 0, formatIssues: 1, userAuthorsExcluded: ['lpmasser', 'second'], plainMetadata: null }));
 });
 
 test('omitting staticDir retains the placeholder and non-root 404', async t => {

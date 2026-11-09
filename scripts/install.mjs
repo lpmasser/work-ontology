@@ -9,6 +9,7 @@ import { npm } from './npm.mjs';
 import { installCommand } from './install-command.mjs';
 import { ensureSyncService, preflightSyncService } from './sync-service.mjs';
 import { retireWorkbench } from './retire-workbench.mjs';
+import { normalizeWebUrl, webUsers } from '../core/links.mjs';
 import { git, ensureInfoHub } from './install-source.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -66,10 +67,12 @@ async function writeResident(root, userHome) {
 function parseArgs(argv) {
   const options = {};
   for (let i = 0; i < argv.length; i++) {
-    const key = { '--root': 'root', '--infohub-url': 'infohubUrl' }[argv[i]];
+    const key = { '--root': 'root', '--infohub-url': 'infohubUrl', '--web-url': 'webUrl', '--web-user': 'webUser' }[argv[i]];
     if (key && argv[i + 1] && !argv[i + 1].startsWith('--')) options[key] = argv[++i];
-    else throw new Error(`未知选项或缺少值：${argv[i]}。用法：node scripts/install.mjs [--root <目录>] [--infohub-url <SSH地址>]`);
+    else throw new Error(`未知选项或缺少值：${argv[i]}。用法：node scripts/install.mjs [--root <目录>] [--infohub-url <SSH地址>] [--web-url <网页地址>] [--web-user <网页用户名>]`);
   }
+  if (options.webUrl !== undefined) options.webUrl = normalizeWebUrl(options.webUrl);
+  if (options.webUser !== undefined) webUsers({ webUser: options.webUser });
   return options;
 }
 
@@ -111,7 +114,7 @@ async function linkSkill(source, target) {
   console.log(`已创建链接: ${target} -> ${source}`);
 }
 
-export async function installCli(rootArg, userHome = homedir(), repository) {
+export async function installCli(rootArg, userHome = homedir(), repository, web = {}) {
   // npm owns the platform-specific global shims. Keep them outside Node's
   // version directory so changing mise/nvm versions cannot remove the command.
   npm(['install', '--omit=dev', '--no-audit', '--no-fund'], { cwd: repoRoot, stdio: 'inherit' });
@@ -142,7 +145,9 @@ export async function installCli(rootArg, userHome = homedir(), repository) {
   catch (error) { if (error.code !== 'ENOENT') throw error; }
 
   const runtime = { node: command.node, git: command.git, cli: path.join(repoRoot, 'cli', 'infohub.mjs') };
-  await writeFile(configFile, JSON.stringify({ root, runtime, repository: repository || prior.repository }, null, 2) + '\n', 'utf8');
+  const webUrl = normalizeWebUrl(web.webUrl ?? prior.webUrl), webUser = web.webUser ?? prior.webUser;
+  webUsers({ webUser });
+  await writeFile(configFile, JSON.stringify({ root, runtime, repository: repository || prior.repository, ...(webUrl ? { webUrl } : {}), ...(webUser ? { webUser } : {}) }, null, 2) + '\n', 'utf8');
   console.log(`已更新配置: ${configFile}`);
   return runtime;
 }
@@ -165,7 +170,7 @@ export async function install(argv = process.argv.slice(2)) {
     step = '读取或克隆 InfoHub'; console.log(`\n[1/4] ${step}`);
     await ensureInfoHub(root, infohubUrl);
     step = '安装 CLI、Skill 和常驻指令'; console.log(`\n[2/4] ${step}`);
-    const runtime = await installCli(root, userHome, infohubUrl);
+    const runtime = await installCli(root, userHome, infohubUrl, options);
     step = '迁移旧桌面工作台'; console.log(`\n[3/4] ${step}`);
     await preflightSyncService(root);
     await retireWorkbench(root);

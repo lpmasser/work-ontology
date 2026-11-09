@@ -6,9 +6,10 @@ import { configureRuntime } from '../core/runtime.mjs';
 import { loadVault } from '../core/vault.mjs';
 import { buildOverview } from '../core/overview.mjs';
 import { queryFind, queryGet, queryAround } from '../core/query.mjs';
+import { inspectMarkdown } from '../core/annotations.mjs';
 import { status } from '../sync/command.mjs';
 import { Sessions, validHash } from './web-auth.mjs';
-import { Files, HttpError, etag, contentType, safePath } from './web-files.mjs';
+import { Files, HttpError, etag, contentType, safePath, filePath } from './web-files.mjs';
 import { WorkspaceEvents } from './web-events.mjs';
 import { serveStatic } from './web-static.mjs';
 
@@ -87,6 +88,12 @@ export async function createWebServer(config, { eventIntervalMs = 30000 } = {}) 
     res.setHeader('Cache-Control', 'no-store'); res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'same-origin');
     try {
+      if (req.method === 'GET' && req.url.split('?')[0].startsWith('/f/')) {
+        let relative;
+        try { relative = decodeURIComponent(req.url.split('?')[0].slice(3)); }
+        catch { throw new HttpError(400, 'INVALID_PATH', 'URL 路径编码无效'); }
+        filePath(relative);
+      }
       const url = new URL(req.url, origin), route = url.pathname;
       if (req.method === 'GET' && route === '/health') { send(res, 200, { ok: true }); return; }
       const isAPI = route === '/api' || route.startsWith('/api/');
@@ -121,8 +128,8 @@ export async function createWebServer(config, { eventIntervalMs = 30000 } = {}) 
         for (const folder of model.folders) await safePath(files.root, folder);
         const vault = await loadVault(files.root);
         try {
-          const output = route === '/api/overview' ? buildOverview(vault.index) : route === '/api/find' ? queryFind(vault, url.searchParams.getAll('arg')).snapshot
-            : route === '/api/get' ? queryGet(vault, url.searchParams.get('target')) : queryAround(vault, url.searchParams.getAll('arg'));
+          const output = route === '/api/overview' ? buildOverview(vault.index, new Date(), { webUsers: [...names], webUrl: origin }) : route === '/api/find' ? queryFind(vault, url.searchParams.getAll('arg'), { webUrl: origin }).snapshot
+            : route === '/api/get' ? queryGet(vault, url.searchParams.get('target'), { webUrl: origin }) : queryAround(vault, url.searchParams.getAll('arg'), { webUrl: origin });
           send(res, 200, output); return;
         } catch (error) { throw new HttpError(400, 'QUERY_ERROR', error.message); }
       }
@@ -143,6 +150,18 @@ export async function createWebServer(config, { eventIntervalMs = 30000 } = {}) 
         send(res, 200, { version: 1, ...details, etag: fileVersion }, { ETag: fileVersion }); return;
       }
       const selected = await files.source(source);
+      if (route === '/api/annotations' && req.method === 'GET') {
+        const annotations = [], issues = [];
+        for await (const file of files.contents(selected, Number.MAX_SAFE_INTEGER, '.md')) {
+          if (file.bytes === null) throw new HttpError(503, 'SOURCE_UNAVAILABLE', `读取批注文档时文件已变化，请重试`);
+          let text;
+          try { text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(file.bytes); }
+          catch { issues.push({ path: file.path, message: 'Markdown 文件不是有效 UTF-8，无法读取批注' }); continue; }
+          const parsed = inspectMarkdown(text, file.path);
+          annotations.push(...parsed.annotations); issues.push(...parsed.issues);
+        }
+        send(res, 200, { version: 1, ...selected, annotations, issues }); return;
+      }
       if (route === '/api/tree' && req.method === 'GET') { send(res, 200, { version: 1, ...selected, entries: treeEntries(await files.tree(selected)) }); return; }
       if (route === '/api/file' && req.method === 'GET') {
         const relative = url.searchParams.get('path'), bytes = await files.read(selected, relative), version = etag(bytes);

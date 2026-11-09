@@ -7,7 +7,9 @@ import { loadVault } from '../core/vault.mjs';
 import { buildOverview } from '../core/overview.mjs';
 import { isUnfinishedWork } from '../core/engine.js';
 import { resolveProject, filterObjects, queryFind, queryGet, queryAround } from '../core/query.mjs';
-import { checkPaths, selectIssues } from '../core/validation.mjs';
+import { checkPaths, selectIssues, annotationIssuesOutsideModel } from '../core/validation.mjs';
+import { annotationSummary } from '../core/annotations.mjs';
+import { withObjectUrl, objectLocation, webUsers, normalizeWebUrl } from '../core/links.mjs';
 import { command as syncCommand, concerns } from '../sync/command.mjs';
 
 const USAGE = `用法: infohub <命令> [参数...]
@@ -44,7 +46,7 @@ function parseCliArgs(argv) {
   return { root, args: filtered };
 }
 
-async function handleBrief(vault, target, root) {
+async function handleBrief(vault, target, root, config) {
   if (!target) {
     throw new Error('brief 命令缺少 <项目> 参数');
   }
@@ -60,8 +62,9 @@ async function handleBrief(vault, target, root) {
     }
   }
 
+  const location = object => objectLocation(withObjectUrl(object, config?.webUrl));
   const output = [];
-  output.push(`项目入口: ${project.path}`);
+  output.push(`项目入口: ${location(project)}`);
 
   // 规范与方法的相关规则：project_id 是该项目，或 applies_to 包含该项目或属于该项目的对象
   const relatedOfType = type => [...vault.index.objects.values()].filter(obj => obj.type === type
@@ -76,7 +79,7 @@ async function handleBrief(vault, target, root) {
       return;
     }
     for (const obj of objects) {
-      output.push(`${obj.title} — ${obj.frontmatter.use_when || '未写何时使用'} — ${obj.path}`);
+      output.push(`${obj.title} — ${obj.frontmatter.use_when || '未写何时使用'} — ${location(obj)}`);
     }
   };
   pushWithUseWhen('适用规范', relatedOfType('standard'));
@@ -89,24 +92,27 @@ async function handleBrief(vault, target, root) {
   output.push('\n进行中的工作:');
   if (workItems.length) {
     for (const w of workItems) {
-      output.push(`${w.title} [${w.frontmatter.requirement}/${w.frontmatter.progress}] — ${w.path}`);
+      output.push(`${w.title} [${w.frontmatter.requirement}/${w.frontmatter.progress}] — ${location(w)}`);
     }
   } else {
     output.push('无');
   }
 
-  // 4. 需关注: 该项目所有对象中 attention 非空者，每行 title：attention — 路径
-  const attentionObjects = [...vault.index.objects.values()].filter(obj => {
-    if (obj.frontmatter.project_id !== projectId && obj.id !== projectId) return false;
-    return Boolean(obj.frontmatter.attention);
-  });
+  const byPath = new Map();
+  for (const annotation of vault.index.annotations) {
+    if (!byPath.has(annotation.path)) byPath.set(annotation.path, []);
+    byPath.get(annotation.path).push(annotation);
+  }
+  const annotatedObjects = [...vault.index.objects.values()].filter(obj =>
+    (obj.frontmatter.project_id === projectId || obj.id === projectId) && byPath.has(obj.path));
 
   output.push('\n需关注:');
   const syncConcerns = await concerns(root);
-  if (attentionObjects.length || syncConcerns.length) {
+  if (annotatedObjects.length || syncConcerns.length) {
     output.push(...syncConcerns);
-    for (const a of attentionObjects) {
-      output.push(`${a.title}：${a.frontmatter.attention} — ${a.path}`);
+    for (const object of annotatedObjects) {
+      const annotations = byPath.get(object.path);
+      output.push(`${object.title}：${annotations.length} 条批注；${annotationSummary(annotations[0].content)} — ${location(object)}`);
     }
   } else {
     output.push('无');
@@ -115,24 +121,24 @@ async function handleBrief(vault, target, root) {
   console.log(output.join('\n'));
 }
 
-function handleFind(vault, findArgs) {
-  const { json, snapshot } = queryFind(vault, findArgs);
+function handleFind(vault, findArgs, config) {
+  const { json, snapshot } = queryFind(vault, findArgs, config);
   if (json) {
     console.log(JSON.stringify(snapshot));
     return;
   }
   for (const obj of snapshot.objects) {
-    console.log(`${obj.id}  ${obj.type}  ${obj.title} — ${obj.path}`);
+    console.log(`${obj.id}  ${obj.type}  ${obj.title} — ${objectLocation(obj)}`);
   }
   console.log(`共 ${snapshot.objects.length} 个对象`);
 }
 
-function handleOverview(vault) {
-  console.log(JSON.stringify(buildOverview(vault.index)));
+function handleOverview(vault, config) {
+  console.log(JSON.stringify(buildOverview(vault.index, new Date(), { webUsers: webUsers(config), webUrl: config?.webUrl })));
 }
 
-async function handleAround(vault, aroundArgs) {
-  const res = queryAround(vault, aroundArgs);
+async function handleAround(vault, aroundArgs, config) {
+  const res = queryAround(vault, aroundArgs, config);
   if (aroundArgs.includes('--json')) { console.log(JSON.stringify(res)); return; }
 
   const matchedGroups = res.groups.filter(g => g.total > 0);
@@ -144,16 +150,17 @@ async function handleAround(vault, aroundArgs) {
   for (const group of matchedGroups) {
     console.log(`${group.label} (${group.total})`);
     for (const obj of group.objects) {
-      console.log(`  ${obj.id}  ${obj.title} — ${obj.path}`);
+      console.log(`  ${obj.id}  ${obj.title} — ${objectLocation(obj)}`);
     }
   }
 }
 
-async function handleGet(vault, target, json) {
-  const snapshot = queryGet(vault, target);
+async function handleGet(vault, target, json, config) {
+  const snapshot = queryGet(vault, target, config);
   if (json) { console.log(JSON.stringify(snapshot)); return; }
   const obj = snapshot.object;
   console.log(`路径: ${obj.path}`);
+  if (obj.url) console.log(`网页: ${obj.url}`);
   for (const [key, val] of Object.entries(obj.frontmatter)) {
     const displayVal = Array.isArray(val) ? val.join(', ') : val;
     console.log(`${key}: ${displayVal}`);
@@ -162,7 +169,7 @@ async function handleGet(vault, target, json) {
 
 async function handleCheck(vault, paths, root) {
   const targets = await checkPaths(root, paths, vault.model);
-  const issues = paths.length ? selectIssues(vault.index.issues, targets) : vault.index.issues;
+  const issues = [...(paths.length ? selectIssues(vault.index.issues, targets) : vault.index.issues), ...await annotationIssuesOutsideModel(root, targets, vault.model)];
 
   if (issues.length === 0) {
     console.log('无问题');
@@ -185,7 +192,8 @@ export async function main(argv = process.argv.slice(2)) {
     return command === 'help' ? 0 : 1;
   }
 
-  const config = await readConfig();
+  const config = await readConfig() || {};
+  if (config.webUrl) config.webUrl = normalizeWebUrl(config.webUrl);
   if (!cliRoot && !config?.root) throw new Error('未指定 InfoHub 根目录；请使用 --root <dir> 或运行 scripts/install.mjs。');
   const root = path.resolve(cliRoot || config.root);
   await configureRuntime(config);
@@ -194,20 +202,20 @@ export async function main(argv = process.argv.slice(2)) {
 
   switch (command) {
     case 'brief':
-      await handleBrief(vault, args[1], root);
+      await handleBrief(vault, args[1], root, config);
       return 0;
     case 'find':
-      await handleFind(vault, args.slice(1));
+      await handleFind(vault, args.slice(1), config);
       return 0;
     case 'overview':
       if (args.length !== 1) throw new Error('overview 命令不接受参数');
-      handleOverview(vault);
+      handleOverview(vault, config);
       return 0;
     case 'around':
-      await handleAround(vault, args.slice(1));
+      await handleAround(vault, args.slice(1), config);
       return 0;
     case 'get':
-      await handleGet(vault, args.slice(1).find(arg => arg !== '--json'), args.includes('--json'));
+      await handleGet(vault, args.slice(1).find(arg => arg !== '--json'), args.includes('--json'), config);
       return 0;
     case 'check':
       return await handleCheck(vault, args.slice(1), root);

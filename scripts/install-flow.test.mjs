@@ -62,7 +62,7 @@ if(args.includes('enable')) {
   const entry = path.join(base, 'install.mjs');
   await symlink(path.join(import.meta.dirname, 'install.mjs'), entry);
   const invoke = (withUrl = true) => spawnSync(process.execPath, [entry, '--root', root,
-    ...(withUrl ? ['--infohub-url', 'ssh://git@fixture/InfoHub.git'] : [])], { env, encoding: 'utf8' });
+    ...(withUrl ? ['--infohub-url', 'ssh://git@fixture/InfoHub.git', '--web-url', 'https://infohub.example.test/', '--web-user', 'alice'] : [])], { env, encoding: 'utf8' });
   const missing = invoke(false); assert.equal(missing.status, 1); assert.match(missing.stderr, /--infohub-url/);
   const first = invoke(); assert.equal(first.status, 0, first.stdout + first.stderr);
   assert.equal(await realpath(path.join(home, '.codex/skills/netcatty-ssh')), await realpath(path.join(root, 'skills/netcatty-ssh')));
@@ -70,6 +70,8 @@ if(args.includes('enable')) {
   const config = await readFile(path.join(home, '.config/infohub/config.json'), 'utf8');
   const resident = await readFile(path.join(home, '.codex/AGENTS.md'), 'utf8');
   assert.equal(JSON.parse(config).repository, 'ssh://git@fixture/InfoHub.git');
+  assert.equal(JSON.parse(config).webUrl, 'https://infohub.example.test');
+  assert.equal(JSON.parse(config).webUser, 'alice');
   const second = invoke(false); assert.equal(second.status, 0, second.stdout + second.stderr);
   assert.equal(await readFile(path.join(home, '.config/infohub/config.json'), 'utf8'), config);
   assert.equal(await readFile(path.join(home, '.codex/AGENTS.md'), 'utf8'), resident);
