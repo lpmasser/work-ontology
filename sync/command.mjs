@@ -55,6 +55,7 @@ export async function status(root) {
     if (pid !== undefined && (!Number.isInteger(pid) || pid <= 0)) throw new Error('后台 PID 文件无效');
     result.running = Boolean(pid && alive(pid));
     result.pid = result.running ? pid : null;
+    if (result.running && managers.includes(state.manager)) result.manager = state.manager;
   } catch (error) { result.pending.status = error.message; }
   return result;
 }

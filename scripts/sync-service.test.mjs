@@ -15,14 +15,15 @@ import { run } from '../core/process.mjs';
 const runtime = { node: process.execPath, git: findExecutable('git'), cli: path.resolve(import.meta.dirname, '../cli/infohub.mjs') };
 async function fixture(t) {
   const base = await mkdtemp(path.join(tmpdir(), 'InfoHub 服务 中文-'));
-  t.after(() => rm(base, { recursive: true, force: true }));
+  const cleanup = [];
+  t.after(async () => { for (const action of cleanup) await action(); await rm(base, { recursive: true, force: true }); });
   const remote = path.join(base, 'remote.git'), root = path.join(base, 'root');
   await git(base, ['init', '--bare', '--initial-branch=main', remote]);
   await git(base, ['clone', remote, root]);
   await git(root, ['config', 'user.name', 'Test']); await git(root, ['config', 'user.email', 'test@example.invalid']);
   await writeFile(path.join(root, 'test.txt'), 'no content changes\n');
   await git(root, ['add', '.']); await git(root, ['commit', '-m', 'fixture']); await git(root, ['push', 'origin', 'main']);
-  return { base, root };
+  return { base, root, beforeCleanup: action => cleanup.unshift(action) };
 }
 async function until(fn, ms = 15000) {
   const deadline = Date.now() + ms;
@@ -60,14 +61,14 @@ test('desktop migration waits for safe exit and preserves user data; cancellatio
 });
 
 test('Windows task entry runs the shared foreground loop and drains it over IPC without leaving lease', async t => {
-  const { root } = await fixture(t), id = '22222222-2222-4222-8222-222222222222';
+  const { root, beforeCleanup } = await fixture(t), id = '22222222-2222-4222-8222-222222222222';
   await save(path.join(root, '.git/infohub-sync/config.json'), { fetchSeconds: .2, idleSeconds: 3600 });
   const file = path.join(root, '.git/infohub-sync/service-runner.json');
   await save(file, { id, root, runtime, log: path.join(root, '.git/infohub-sync/service.log'), runnerLease: path.join(root, '.git/infohub-sync/runner.pid') });
   const child = spawn(process.execPath, [path.join(import.meta.dirname, 'service-runner.mjs'), file], { stdio: 'pipe', windowsHide: true });
   let output = ''; child.stderr.on('data', bytes => { output += bytes; });
   const done = new Promise(resolve => child.once('close', resolve));
-  t.after(async () => { if (child.exitCode === null) { await requestServiceStop(id).catch(() => {}); await done; } });
+  beforeCleanup(async () => { if (child.exitCode === null) { await requestServiceStop(id).catch(() => {}); await done; } });
   await until(async () => Boolean((await status(root)).lastFetch)).catch(e => { throw new Error(`${e.message}: ${output}`); });
   assert.equal((await status(root)).manager, 'task-scheduler');
   await requestServiceStop(id); assert.equal(await done, 0, output);
@@ -78,10 +79,15 @@ test('Windows task entry runs the shared foreground loop and drains it over IPC 
 });
 
 test('real OS user service reuses PID on reinstall, restarts a failed loop, and stops gracefully', { skip: !process.env.INFOHUB_TEST_SERVICE ? 'run with INFOHUB_TEST_SERVICE=1 in native user session' : false, timeout: 210000 }, async t => {
-  const { root } = await fixture(t);
+  const { root, beforeCleanup } = await fixture(t);
   await save(path.join(root, '.git/infohub-sync/config.json'), { fetchSeconds: .2, idleSeconds: 3600 });
+  beforeCleanup(async () => {
+    let id;
+    try { id = JSON.parse(await readFile(path.join(root, '.git/infohub-sync/identity.json'), 'utf8')).id; }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (id) await stopService(serviceLocation(id), root);
+  });
   const installed = await ensureSyncService(root, runtime);
-  t.after(() => stopService(installed, root));
   const before = await stat(installed.file), firstPid = installed.pid;
   const repeated = await ensureSyncService(root, runtime);
   assert.equal(repeated.pid, firstPid); assert.equal((await stat(installed.file)).mtimeMs, before.mtimeMs);

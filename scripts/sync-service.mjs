@@ -101,8 +101,10 @@ export async function ensureSyncService(root, runtime, { home = homedir(), platf
     // foreign or legacy registration merely because our file happens to match.
     let registered = true;
     if (loc.manager === 'task-scheduler' && await serviceLoaded(loc, execute)) {
-      const query = await execute('schtasks.exe', ['/Query', '/TN', loc.target, '/XML']);
-      registered = query.stdout.includes('S4U') && query.stdout.includes(xml(runtime.node)) && query.stdout.includes(xml(runnerFile));
+      const query = await execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "$ErrorActionPreference='Stop'; $t=Get-ScheduledTask -TaskName $env:INFOHUB_TASK_NAME; $j=@{program=$t.Actions[0].Execute; arguments=$t.Actions[0].Arguments; logonType=$t.Principal.LogonType.ToString()} | ConvertTo-Json -Compress; [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($j))"], { env: { INFOHUB_TASK_NAME: loc.target } });
+      const actual = JSON.parse(Buffer.from(query.stdout.trim(), 'base64').toString('utf8'));
+      const args = [path.resolve(import.meta.dirname, 'service-runner.mjs'), runnerFile].map(winArg).join(' ');
+      registered = actual.logonType === 'S4U' && actual.program === runtime.node && actual.arguments === args;
     }
     const loaded = await serviceLoaded(loc, execute);
     const wasRunning = (await status(root)).running;
