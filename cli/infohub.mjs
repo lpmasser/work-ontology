@@ -19,7 +19,7 @@ const USAGE = `用法: infohub <命令> [参数...]
   around <ID或路径>... [--relation <关系>] [--direction outgoing|incoming] 查询关联对象
   get <ID或路径>                                             获取对象路径与全部属性
   check [路径...]                                           校验对象与模型（有错误退出码 1）
-  sync run|status|logs                               运行同步本体或查看状态（托管由工作台 / Docker 负责）
+  sync run|status|logs                               运行同步本体或查看状态（托管由系统用户服务 / Docker 负责）
   help                                                     显示帮助信息
 
 选项:

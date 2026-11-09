@@ -3,10 +3,13 @@ import path from 'node:path';
 import { Client, context, config, defaults } from './client.mjs';
 import { value, json, save, lease, alive, iso } from './git.mjs';
 
+const managers = ['docker', 'launchd', 'systemd', 'task-scheduler', 'foreground'];
+const manager = () => managers.includes(process.env.INFOHUB_SYNC_MANAGER) ? process.env.INFOHUB_SYNC_MANAGER : 'foreground';
+
 // Status is a read-only filesystem snapshot: it must not look like Git activity.
 export async function status(root) {
   const result = {
-    version: 1, manager: process.env.INFOHUB_SYNC_MANAGER === 'docker' ? 'docker' : 'workbench', backoff: {}, running: false, installed: null, pid: null, settings: null,
+    version: 1, manager: manager(), backoff: {}, running: false, installed: null, pid: null, settings: null,
     log: null, clone: null, startedAt: null, checkedAt: null, finishedAt: null,
     idleSince: null, lastFetch: null, lastPull: null, lastDraft: null,
     lastCommit: null, lastPush: null, lastDraftCleanup: null,
@@ -27,11 +30,13 @@ export async function status(root) {
       result.settings = Object.fromEntries(Object.entries(defaults).map(([key, fallback]) => [key, settings[key] ?? fallback]));
       if (Object.values(result.settings).some(value => !Number.isFinite(value) || value <= 0)) throw new Error('后台周期必须是正数');
     }
+    const registration = await json(path.join(home, 'service.json'));
+    if (registration && managers.includes(registration.manager)) { result.manager = registration.manager; result.log = registration.log ?? null; }
     const state = await json(path.join(home, 'state.json'), {});
     if (!state || typeof state !== 'object' || Array.isArray(state)) throw new Error('后台状态必须是对象');
     if (state.pending != null && (typeof state.pending !== 'object' || Array.isArray(state.pending) || Object.values(state.pending).some(value => typeof value !== 'string'))) throw new Error('后台 pending 格式无效');
     for (const key of ['log', 'startedAt', 'checkedAt', 'finishedAt', 'idleSince', 'lastFetch', 'lastPull', 'lastDraft', 'lastCommit', 'lastPush', 'lastDraftCleanup', 'draft', 'cleanedDraft']) result[key] = state[key] ?? null;
-    if (['docker', 'workbench'].includes(state.manager)) result.manager = state.manager;
+    if (managers.includes(state.manager) && !registration) result.manager = state.manager;
     result.backoff = state.backoff || {};
     if (state.clone) {
       const { id, machine, user, root } = state.clone;
@@ -57,7 +62,7 @@ export async function status(root) {
 export async function concerns(root) {
   const s = await status(root);
   const lines = Object.entries(s.pending || {}).map(([kind, reason]) => `InfoHub 同步/${kind}：${reason}`);
-  if (!s.running) lines.push(s.manager === 'docker' ? 'InfoHub 同步：未运行，请检查 infohub-sync 容器' : 'InfoHub 同步：未运行，请启动 InfoHub Workbench');
+  if (!s.running) lines.push(s.manager === 'docker' ? 'InfoHub 同步：未运行，请检查同步容器' : 'InfoHub 同步：未运行，请检查系统用户服务和同步日志，或重跑安装器');
   if (s.running && Date.now() - Date.parse(s.finishedAt || s.startedAt) > 120000) lines.push('InfoHub 同步：本机状态超过 2 分钟未更新，请检查日志');
   const seenOverlaps = new Set();
   for (const d of s.server?.drafts || []) {
@@ -74,8 +79,8 @@ export async function concerns(root) {
 export async function command(root, args) {
   const action = args[0] || 'status';
   if (action === 'status') { console.log(JSON.stringify(await status(root), null, 2)); return; }
-  if (action === 'logs') { console.log((await status(root)).log || '同步在前台输出日志；桌面请查看工作台日志，服务器请使用 docker logs infohub-sync'); return; }
-  if (action !== 'run') throw new Error('用法: infohub sync run|status|logs。桌面由 InfoHub Workbench 托管，服务器由 Docker 托管。');
+  if (action === 'logs') { console.log((await status(root)).log || '同步在前台输出日志；系统服务日志见副本 .git/infohub-sync/service.log，服务器请使用 docker logs <同步容器>'); return; }
+  if (action !== 'run') throw new Error('用法: infohub sync run|status|logs。登录机器由系统用户服务托管，服务器由 Docker 托管。');
   const overrides = {}; let includeExisting = false, parentStdio = false;
   for (let i = 1; i < args.length; i++) {
     const key = { '--fetch-seconds': 'fetchSeconds', '--draft-seconds': 'draftSeconds', '--idle-seconds': 'idleSeconds' }[args[i]];
@@ -98,7 +103,7 @@ export async function command(root, args) {
       && await value(ctx, ['status', '--porcelain', '--untracked-files=all'])) throw new Error('首次启用检测到未提交内容；确认允许闲置自动提交后，用 sync run --include-existing 完成首次启用');
     await save(path.join(ctx.home, 'config.json'), settings);
     const client = await Client.open(root, settings, abort.signal);
-    client.state.manager = process.env.INFOHUB_SYNC_MANAGER === 'docker' ? 'docker' : 'workbench';
+    client.state.manager = manager();
     client.state.log = process.env.INFOHUB_SYNC_LOG || null;
     await save(path.join(ctx.home, 'state.json'), client.state);
     while (!abort.signal.aborted) {

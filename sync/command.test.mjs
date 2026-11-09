@@ -45,9 +45,9 @@ test('stopped guidance is produced by status manager metadata', async t => {
   t.after(() => rm(root, { recursive: true, force: true }));
   const home = path.join(root, '.git/infohub-sync');
   await mkdir(home, { recursive: true });
-  assert.equal((await status(root)).manager, 'workbench');
-  assert.ok((await concerns(root)).some(s => s.includes('请启动 InfoHub Workbench')));
+  assert.equal((await status(root)).manager, 'foreground');
+  assert.ok((await concerns(root)).some(s => s.includes('系统用户服务')));
   await writeFile(path.join(home, 'state.json'), JSON.stringify({ manager: 'docker', pending: {} }));
   assert.equal((await status(root)).manager, 'docker');
-  assert.ok((await concerns(root)).some(s => s.includes('请检查 infohub-sync 容器')));
+  assert.ok((await concerns(root)).some(s => s.includes('请检查同步容器')));
 });

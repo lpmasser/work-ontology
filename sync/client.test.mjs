@@ -344,7 +344,7 @@ test('Agent commit, rejected push, pull merge and later edits retire the owning 
   report = await scanDrafts(f.bare, f.server); await restarted.tick();
   assert.equal(report.drafts.length, 0); assert.deepEqual((await status(f.a)).pending, {});
   const brief = await run(process.execPath, [path.join(repoRoot, 'cli/infohub.mjs'), '--root', f.a, 'brief', 'project-1']);
-  assert.match(brief.stdout.split('需关注:')[1], /InfoHub Workbench/);
+  assert.match(brief.stdout.split('需关注:')[1], /系统用户服务/);
   assert.doesNotMatch(brief.stdout.split('需关注:')[1], /草稿/);
   evidence('superseded-draft-cleaned-by-owning-clone', { head, indexSha256: index, cleanedDraft: restarted.state.cleanedDraft, briefAttention: brief.stdout.split('需关注:')[1].trim() });
 });

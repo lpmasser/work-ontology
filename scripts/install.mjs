@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 import { existsSync } from 'node:fs';
-import { lstat, readlink, mkdir, symlink, writeFile, readFile, realpath } from 'node:fs/promises';
+import { lstat, readlink, mkdir, symlink, writeFile, readFile, realpath, unlink } from 'node:fs/promises';
 import { homedir, platform } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { npm } from './npm.mjs';
 import { installCommand } from './install-command.mjs';
-import { cleanupLegacySync } from './cleanup-legacy-sync.mjs';
-import { git, ensureInfoHub, installWorkbench } from './install-source.mjs';
+import { ensureSyncService, preflightSyncService } from './sync-service.mjs';
+import { retireWorkbench } from './retire-workbench.mjs';
+import { git, ensureInfoHub } from './install-source.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const skillDir = path.join(repoRoot, 'skill');
@@ -90,6 +91,16 @@ async function linkSkill(source, target) {
         console.log(`链接已存在且指向同处，跳过: ${target}`);
         return;
       }
+      if (path.basename(target) === 'infohub') {
+        let owner;
+        try { owner = JSON.parse(await readFile(path.join(resolved, '../package.json'), 'utf8')); }
+        catch (e) { if (e.code !== 'ENOENT') throw e; }
+        if (owner?.name === 'work-ontology') {
+          await unlink(target);
+          await symlink(source, target, platform() === 'win32' ? 'junction' : 'dir');
+          console.log(`已更新 InfoHub 工具源码链接: ${target} -> ${source}`); return;
+        }
+      }
       throw new Error(`目标已存在且指向其他路径 (${resolved})，中止: ${target}`);
     }
     throw new Error(`目标已存在且不是符号链接，中止: ${target}`);
@@ -154,14 +165,15 @@ export async function install(argv = process.argv.slice(2)) {
     step = '读取或克隆 InfoHub'; console.log(`\n[1/4] ${step}`);
     await ensureInfoHub(root, infohubUrl);
     step = '安装 CLI、Skill 和常驻指令'; console.log(`\n[2/4] ${step}`);
-    await installCli(root, userHome, infohubUrl);
-    step = '清理旧同步托管'; console.log(`\n[3/4] ${step}`);
-    await cleanupLegacySync(root, userHome);
-    step = '首次安装工作台'; console.log(`\n[4/4] ${step}`);
-    await installWorkbench();
-    console.log(`\n接入已配置。InfoHub：${root}；工作台启动后托管同步。`);
+    const runtime = await installCli(root, userHome, infohubUrl);
+    step = '迁移旧桌面工作台'; console.log(`\n[3/4] ${step}`);
+    await preflightSyncService(root);
+    await retireWorkbench(root);
+    step = '登记并启动系统同步服务'; console.log(`\n[4/4] ${step}`);
+    await ensureSyncService(root, runtime);
+    console.log(`\n接入已配置。InfoHub：${root}；同步由系统用户服务托管，网页阅读和编辑。`);
   } catch (e) {
-    throw new Error(`[${step}] ${e.message}\n修正后重跑同一 install 命令即可；已有副本和同步配置不会被覆盖。工作台启动后托管同步；首次已有未提交内容时按同步提示确认。`);
+    throw new Error(`[${step}] ${e.message}\n修正后重跑同一 install 命令即可；已有副本和同步身份不会被覆盖。同步由系统服务托管；首次已有未提交内容时仍须明确确认。`);
   }
 }
 

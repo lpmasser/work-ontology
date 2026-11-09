@@ -208,7 +208,7 @@ sync status v1（HTTP 和 SSE 的 status 字段是同一投影）：
 
 ```text
 {
-  version: 1, manager: "docker" | "workbench", running: boolean,
+  version: 1, manager: "docker" | "launchd" | "systemd" | "task-scheduler" | "foreground", running: boolean,
   installed: boolean | null, pid: number | null,
   settings: {fetchSeconds, draftSeconds, idleSeconds} | null,
   log, clone: {id, machine, user, root} | null,
@@ -223,7 +223,7 @@ sync status v1（HTTP 和 SSE 的 status 字段是同一投影）：
 }
 ```
 
-上述时间和 log 字段均为 string 或 null，时间为 ISO 8601。`installed: null` 表示配置/状态读取失败，原因在 pending。Draft 的字段：`ref,id,commit,updatedAt,stale,source?,base?,changedPaths?,conflicts?,error?,overlaps?`；`overlaps` 条目为 `{ref,source,paths,mergeable,conflicts,error?}`。直接显示 pending 的中文原因；running 只表示同一 PID namespace 中的同步进程存活，不表示最近网络操作成功。前端不自行推算 ahead/dirty/同步健康状态。
+上述时间和 log 字段均为 string 或 null，时间为 ISO 8601。`installed` 表示副本有有效同步配置，不代表系统登记存在或进程存活；`installed: null` 表示配置/状态读取失败，原因在 pending。`manager` 表示已登记或最近运行的宿主，系统服务登记文件在副本 `.git/infohub-sync/service.json`；`running` 仍来自 PID lease 存活检测，不能仅由登记文件推断。Draft 的字段：`ref,id,commit,updatedAt,stale,source?,base?,changedPaths?,conflicts?,error?,overlaps?`；`overlaps` 条目为 `{ref,source,paths,mergeable,conflicts,error?}`。直接显示 pending 的中文原因；running 只表示同一 PID namespace 中的同步进程存活，不表示最近网络操作成功。前端不自行推算 ahead/dirty/同步健康状态。
 
 ## SSE 变更事件
 
