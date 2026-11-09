@@ -6,7 +6,7 @@ import { waitStopped } from './service-control.mjs';
 
 const products = ['InfoHub Workbench', 'Otterly'];
 const executableName = /^(?:infohub-workbench|otterly|InfoHubWorkbench)(?:\.exe|\.AppImage)?$/i;
-const exists = async file => { try { await access(file); return true; } catch (e) { if (e.code !== 'ENOENT') throw e; return false; } };
+const exists = async file => { try { await access(file); return true; } catch (e) { if (!['ENOENT', 'ENOTDIR'].includes(e.code)) throw e; return false; } };
 export function desktopLocations(home = homedir(), platform = process.platform) {
   if (platform === 'darwin') return products.flatMap(name => ['/Applications', path.join(home, 'Applications')].map(dir => ({ app: path.join(dir, name + '.app'), binaries: ['infohub-workbench', 'otterly'].map(bin => path.join(dir, name + '.app/Contents/MacOS', bin)) })));
   if (platform === 'win32') return products.flatMap(name => [process.env.LOCALAPPDATA || path.join(home, 'AppData/Local'), path.join(home, 'AppData/Local/Programs')].map(dir => ({ app: path.join(dir, name), binaries: ['infohub-workbench.exe', 'otterly.exe'].map(bin => path.join(dir, name, bin)) })));

@@ -31,15 +31,15 @@ Description=InfoHub synchronization (${loc.id})
 StartLimitIntervalSec=0
 [Service]
 Type=simple
-WorkingDirectory=${unitValue(root)}
+WorkingDirectory=${root.replaceAll('%', '%%')}
 ExecStart=${argv.map(unitArg).join(' ')}
 ${Object.entries(env).map(([k,v]) => `Environment=${unitValue(`${k}=${v}`)}`).join('\n')}
 Restart=always
 RestartSec=5
 KillMode=mixed
 TimeoutStopSec=30
-StandardOutput=${unitValue(`append:${log}`)}
-StandardError=${unitValue(`append:${log}`)}
+StandardOutput=append:${log.replaceAll('%', '%%')}
+StandardError=append:${log.replaceAll('%', '%%')}
 [Install]
 WantedBy=default.target
 `;
