@@ -6,9 +6,9 @@
 | --- | --- | --- | --- |
 | macOS | `~/Library/LaunchAgents/de.eloyzh.infohub-sync.<clone UUID>.plist` | GUI login, KeepAlive, 5 s throttle | `<clone>/.git/infohub-sync/service.log` |
 | Linux | `~/.config/systemd/user/de.eloyzh.infohub-sync.<clone UUID>.service` | user manager/default.target, Restart=always after 5 s | same |
-| Windows | scheduled task `de.eloyzh.infohub-sync.<clone UUID>`; cached XML under `~/.config/infohub/tasks/` | S4U login trigger, RestartOnFailure every minute (999 retries), IgnoreNew | same |
+| Windows | scheduled task `de.eloyzh.infohub-sync.<clone UUID>`; cached XML under `~/.config/infohub/tasks/` | S4U login trigger plus a one-minute recovery trigger, RestartOnFailure (999 retries), IgnoreNew | same |
 
-Node and Git come from the stable runtime paths in `~/.config/infohub/config.json`. Native definitions preserve Unicode and spaces and construct a minimal PATH. Windows uses a small Node process entry for log redirection and an IPC stop channel; it starts exactly the same foreground CLI with `--parent-stdio`. The task owns retry policy. It does not implement another sync loop or infer Git status.
+Node and Git come from the stable runtime paths in `~/.config/infohub/config.json`. Native definitions preserve Unicode and spaces and construct a minimal PATH. Windows uses a small Node process entry for log redirection and an IPC stop channel; it starts exactly the same foreground CLI with `--parent-stdio`. The task owns retry policy. A periodic native trigger also recovers a dead task when Task Scheduler does not apply RestartOnFailure to the prior execution. `IgnoreNew` leaves a healthy long-running instance untouched, and the clone lease is the final guard. It does not implement another sync loop or infer Git status.
 
 Repeat installation retains the clone UUID. An unchanged registration and active process are reused without rewriting its native definition. A changed runtime/root/definition is stopped gracefully before replacement. Previous task identities belonging to a moved clone are retired; copied `.git` metadata cannot claim another clone's task. The clone PID lease still prevents simultaneous loops, including a manually started one. Installation refuses to start another host when an unrelated loop remains active.
 
@@ -39,9 +39,9 @@ node scripts/install.mjs --root <clone>
 systemctl --user stop de.eloyzh.infohub-sync.<UUID>.service
 systemctl --user start de.eloyzh.infohub-sync.<UUID>.service
 
-# Windows: from the software checkout, stop through IPC, never /End
+# Windows: disable recovery triggers, then stop through IPC, never /End
 node scripts/service-control.mjs --root <clone>
-schtasks.exe /Run /TN de.eloyzh.infohub-sync.<UUID>
+node scripts/install.mjs --root <clone>
 ```
 
 macOS needs a logged-in GUI user. Linux needs a working systemd user manager; ordinary login starts the enabled unit, and logging out may stop that user manager unless the administrator intentionally enables linger. The installer does not change linger policy. Windows S4U stores no password and avoids an interactive console, but requires batch-logon permission and noninteractive SSH. EFS/DPAPI-dependent keys or an interactive ssh-agent may be unavailable; the actual first fetch checks that boundary. Do not replace it with a stored account password merely to bypass an error.

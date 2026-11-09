@@ -20,7 +20,7 @@ export function serviceLocation(id, home = homedir(), platform = process.platfor
   if (platform === 'win32') return { id, manager: 'task-scheduler', name, file: path.join(home, '.config/infohub/tasks', name + '.xml'), target: name };
   throw new Error(`不支持的系统服务平台: ${platform}`);
 }
-export function serviceDefinition(loc, root, runtime, log, home, sid) {
+export function serviceDefinition(loc, root, runtime, log, home, sid, startBoundary) {
   const argv = [runtime.node, runtime.cli, '--root', root, 'sync', 'run'];
   const env = { HOME: home, PATH: minimalPath(runtime), INFOHUB_SYNC_MANAGER: loc.manager, INFOHUB_SYNC_LOG: log };
   if (loc.manager === 'launchd') return `<?xml version="1.0" encoding="UTF-8"?>
@@ -46,7 +46,7 @@ WantedBy=default.target
   const runner = path.resolve(import.meta.dirname, 'service-runner.mjs');
   const settings = path.join(root, '.git/infohub-sync/service-runner.json');
   return `<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><LogonTrigger><Enabled>true</Enabled><UserId>${xml(sid)}</UserId></LogonTrigger></Triggers><Principals><Principal id="Author"><UserId>${xml(sid)}</UserId><LogonType>S4U</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>false</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure></Settings><Actions Context="Author"><Exec><Command>${xml(runtime.node)}</Command><Arguments>${xml([runner, settings].map(winArg).join(' '))}</Arguments><WorkingDirectory>${xml(root)}</WorkingDirectory></Exec></Actions></Task>\n`;
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><LogonTrigger><Enabled>true</Enabled><UserId>${xml(sid)}</UserId></LogonTrigger><TimeTrigger><Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><StartBoundary>${xml(startBoundary || '2020-01-01T00:00:00Z')}</StartBoundary><Enabled>true</Enabled></TimeTrigger></Triggers><Principals><Principal id="Author"><UserId>${xml(sid)}</UserId><LogonType>S4U</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>false</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure></Settings><Actions Context="Author"><Exec><Command>${xml(runtime.node)}</Command><Arguments>${xml([runner, settings].map(winArg).join(' '))}</Arguments><WorkingDirectory>${xml(root)}</WorkingDirectory></Exec></Actions></Task>\n`;
 }
 async function read(file, encoding = 'utf8') { try { return await readFile(file, encoding); } catch (e) { if (e.code !== 'ENOENT') throw e; return null; } }
 export async function serviceLoaded(loc, execute = run) {
@@ -59,6 +59,7 @@ export async function stopService(loc, root, execute = run) {
   } else if (loc.manager === 'systemd') {
     await execute('systemctl', ['--user', 'disable', '--now', loc.target], { allowFailure: true });
   } else if (await serviceLoaded(loc, execute)) {
+    await execute('schtasks.exe', ['/Change', '/TN', loc.target, '/DISABLE']);
     // /End would kill Node before it reaps Git. Stop via the owned IPC first.
     const pid = Number(await read(path.join(root, '.git/infohub-sync/runner.pid')));
     if (pid && alive(pid)) {
@@ -91,20 +92,22 @@ export async function ensureSyncService(root, runtime, { home = homedir(), platf
     const id = await identity(ctx, settings.identity), loc = serviceLocation(id.id, home, platform);
     const log = path.join(ctx.home, 'service.log');
     const sid = loc.manager === 'task-scheduler' ? (await execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value'])).stdout.trim() : undefined;
-    const definition = serviceDefinition(loc, ctx.root, runtime, log, home, sid);
-    const runnerSettings = { id: id.id, root: ctx.root, runtime, log, runnerLease: path.join(ctx.home, 'runner.pid') };
     const runnerFile = path.join(ctx.home, 'service-runner.json');
-    const sameRunner = loc.manager !== 'task-scheduler' || JSON.stringify(await json(runnerFile)) === JSON.stringify(runnerSettings);
+    const previousRunner = loc.manager === 'task-scheduler' ? await json(runnerFile) : null;
+    const startBoundary = previousRunner?.startBoundary || new Date(Date.now() + 5000).toISOString();
+    const definition = serviceDefinition(loc, ctx.root, runtime, log, home, sid, startBoundary);
+    const runnerSettings = { id: id.id, root: ctx.root, runtime, log, runnerLease: path.join(ctx.home, 'runner.pid'), startBoundary };
+    const sameRunner = loc.manager !== 'task-scheduler' || JSON.stringify(previousRunner) === JSON.stringify(runnerSettings);
     const current = await read(loc.file, loc.manager === 'task-scheduler' ? 'utf16le' : 'utf8');
     const desired = loc.manager === 'task-scheduler' ? '\ufeff' + definition : definition;
     // Compare actual registered task as well as our cached XML; never reuse a
     // foreign or legacy registration merely because our file happens to match.
     let registered = true;
     if (loc.manager === 'task-scheduler' && await serviceLoaded(loc, execute)) {
-      const query = await execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "$ErrorActionPreference='Stop'; $t=Get-ScheduledTask -TaskName $env:INFOHUB_TASK_NAME; $j=@{program=$t.Actions[0].Execute; arguments=$t.Actions[0].Arguments; logonType=$t.Principal.LogonType.ToString()} | ConvertTo-Json -Compress; [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($j))"], { env: { INFOHUB_TASK_NAME: loc.target } });
+      const query = await execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "$ErrorActionPreference='Stop'; $t=Get-ScheduledTask -TaskName $env:INFOHUB_TASK_NAME; $j=@{program=$t.Actions[0].Execute; arguments=$t.Actions[0].Arguments; logonType=$t.Principal.LogonType.ToString(); enabled=$t.Settings.Enabled; watchdog=(@($t.Triggers | Where-Object {$_.Repetition.Interval -eq 'PT1M'}).Count -gt 0)} | ConvertTo-Json -Compress; [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($j))"], { env: { INFOHUB_TASK_NAME: loc.target } });
       const actual = JSON.parse(Buffer.from(query.stdout.trim(), 'base64').toString('utf8'));
       const args = [path.resolve(import.meta.dirname, 'service-runner.mjs'), runnerFile].map(winArg).join(' ');
-      registered = actual.logonType === 'S4U' && actual.program === runtime.node && actual.arguments === args;
+      registered = actual.logonType === 'S4U' && actual.enabled && actual.watchdog && actual.program === runtime.node && actual.arguments === args;
     }
     const loaded = await serviceLoaded(loc, execute);
     const wasRunning = (await status(root)).running;
