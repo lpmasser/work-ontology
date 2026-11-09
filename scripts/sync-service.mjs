@@ -48,7 +48,7 @@ WantedBy=default.target
   return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><LogonTrigger><Enabled>true</Enabled><UserId>${xml(sid)}</UserId></LogonTrigger></Triggers><Principals><Principal id="Author"><UserId>${xml(sid)}</UserId><LogonType>S4U</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>false</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure></Settings><Actions Context="Author"><Exec><Command>${xml(runtime.node)}</Command><Arguments>${xml([runner, settings].map(winArg).join(' '))}</Arguments><WorkingDirectory>${xml(root)}</WorkingDirectory></Exec></Actions></Task>\n`;
 }
-async function read(file) { try { return await readFile(file, 'utf8'); } catch (e) { if (e.code !== 'ENOENT') throw e; return null; } }
+async function read(file, encoding = 'utf8') { try { return await readFile(file, encoding); } catch (e) { if (e.code !== 'ENOENT') throw e; return null; } }
 export async function serviceLoaded(loc, execute = run) {
   const [cmd, args] = loc.manager === 'launchd' ? ['launchctl', ['print', loc.target]] : loc.manager === 'systemd' ? ['systemctl', ['--user', 'is-active', loc.target]] : ['schtasks.exe', ['/Query', '/TN', loc.target, '/XML']];
   return (await execute(cmd, args, { allowFailure: true })).code === 0;
@@ -95,7 +95,7 @@ export async function ensureSyncService(root, runtime, { home = homedir(), platf
     const runnerSettings = { id: id.id, root: ctx.root, runtime, log, runnerLease: path.join(ctx.home, 'runner.pid') };
     const runnerFile = path.join(ctx.home, 'service-runner.json');
     const sameRunner = loc.manager !== 'task-scheduler' || JSON.stringify(await json(runnerFile)) === JSON.stringify(runnerSettings);
-    const current = await read(loc.file);
+    const current = await read(loc.file, loc.manager === 'task-scheduler' ? 'utf16le' : 'utf8');
     const desired = loc.manager === 'task-scheduler' ? '\ufeff' + definition : definition;
     // Compare actual registered task as well as our cached XML; never reuse a
     // foreign or legacy registration merely because our file happens to match.

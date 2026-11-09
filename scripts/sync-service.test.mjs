@@ -5,7 +5,7 @@ import { tmpdir, homedir } from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { serviceLocation, serviceDefinition, ensureSyncService, stopService } from './sync-service.mjs';
-import { retireWorkbench } from './retire-workbench.mjs';
+import { retireWorkbench, desktopProcesses } from './retire-workbench.mjs';
 import { requestServiceStop } from './service-control.mjs';
 import { git, value, save, alive } from '../sync/git.mjs';
 import { status } from '../sync/command.mjs';
@@ -39,7 +39,10 @@ test('native definitions parse with platform tools, keep special paths and resta
   await writeFile(file, loc.manager === 'task-scheduler' ? '\ufeff' + text : text, loc.manager === 'task-scheduler' ? 'utf16le' : 'utf8');
   if (process.platform === 'darwin') await run('plutil', ['-lint', file]);
   if (process.platform === 'linux') await run('systemd-analyze', ['verify', file]);
-  if (process.platform === 'win32') await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[xml]$t=Get-Content -Raw -LiteralPath $env:INFOHUB_TEST_XML; if($t.Task.Settings.RestartOnFailure.Count -ne "999" -or $t.Task.Principals.Principal.LogonType -ne "S4U"){exit 1}',], { env: { INFOHUB_TEST_XML: file } });
+  if (process.platform === 'win32') {
+    assert.ok(Array.isArray(await desktopProcesses()));
+    await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[xml]$t=Get-Content -Raw -LiteralPath $env:INFOHUB_TEST_XML; if($t.Task.Settings.RestartOnFailure.Count -ne "999" -or $t.Task.Principals.Principal.LogonType -ne "S4U"){exit 1}',], { env: { INFOHUB_TEST_XML: file } });
+  }
 });
 
 test('desktop migration waits for safe exit and preserves user data; cancellation does not remove app', async t => {

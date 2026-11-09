@@ -17,8 +17,8 @@ export function desktopLocations(home = homedir(), platform = process.platform) 
 }
 export async function desktopProcesses(execute = run, platform = process.platform) {
   if (platform === 'win32') {
-    const result = await execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "@(Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('infohub-workbench.exe','otterly.exe') } | Select-Object ProcessId,ExecutablePath) | ConvertTo-Json -Compress"]);
-    const parsed = result.stdout.trim() ? JSON.parse(result.stdout) : [];
+    const result = await execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "$ErrorActionPreference='Stop'; $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; $p=@(Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('infohub-workbench.exe','otterly.exe') } | Where-Object { (Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid).Sid -eq $sid } | Select-Object ProcessId,ExecutablePath); $j=ConvertTo-Json -InputObject $p -Compress; [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($j))"]);
+    const parsed = JSON.parse(Buffer.from(result.stdout.trim(), 'base64').toString('utf8'));
     return (Array.isArray(parsed) ? parsed : [parsed]).map(p => ({ pid: p.ProcessId, binary: p.ExecutablePath }));
   }
   if (platform === 'linux') {
