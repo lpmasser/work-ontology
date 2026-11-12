@@ -1,7 +1,7 @@
 import { isISODate, annotationSummary } from './annotations.mjs';
 import { withObjectUrl } from './links.mjs';
 
-import { isUnfinishedWork } from './engine.js';
+import { isUnfinishedWork, needsUserDecision } from './engine.js';
 
 const STALE_AFTER_DAYS = 7;
 const DELIVERY_WINDOW_DAYS = 14;
@@ -40,7 +40,7 @@ export function buildOverview(index, now = new Date(), { webUsers = [], webUrl }
     const updated = dateNumber(fm.updated);
     const age = updated === null ? null : today - updated;
     const unfinished = isUnfinishedWork(object);
-    const awaitingDecision = unfinished && fm.requirement === '待澄清';
+    const awaitingDecision = needsUserDecision(object);
     const stale = unfinished && fm.progress === '实施中' && age !== null && age > STALE_AFTER_DAYS;
     const annotations = object.type === 'work_item' ? agentAnnotations.get(object.path) || [] : [];
     const blocked = annotations.length > 0;

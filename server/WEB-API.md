@@ -215,7 +215,7 @@ find 支持文本、`--type`、`--project`（项目 ID 或标题）、重复 `--
 共同数据形状：
 
 - `Issue = {path: string, message: string}`。
-- `Object = {id, type, title, path, frontmatter, progress?, kind?}`。frontmatter 保留完整解析属性，包括未知字段；读取不是编辑序列化入口。
+- `Object = {id, type, title, path, frontmatter, progress?}`。frontmatter 保留完整解析属性，包括未知字段；读取不是编辑序列化入口。
 - `ObjectInfo = Object` 去掉 `frontmatter`，用于 around。
 
 find v1：`{version:1, objects:Object[], issues:Issue[]}`。
@@ -230,7 +230,7 @@ around v1：
 ],"issues":[]}
 ```
 
-`direction` 为 `out|in`；group 保留 total=0 的合法组，客户端按需要展示；无适用关系时可为空数组。对象定义还可能带 progress、kind。
+`direction` 为 `out|in`；group 保留 total=0 的合法组，客户端按需要展示；无适用关系时可为空数组。对象定义还可能带 progress。
 
 overview v3：
 

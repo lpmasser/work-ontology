@@ -31,20 +31,21 @@ const testModel = {
         applies_to: { type: 'id-list', required: false }
       }
     },
+    requirement: {
+      label: '需求',
+      properties: {
+        project_id: { type: 'id', required: true },
+        status: { type: 'text', required: true, values: ['待澄清', '已明确', '已满足', '搁置', '不做'] },
+        destination: { type: 'text', required: false, values: ['进产品', '交付侧定制', '已有能力'] },
+        targets: { type: 'id-list', required: false }
+      }
+    },
     work_item: {
       label: '工作',
       properties: {
         project_id: { type: 'id', required: true },
-        requirement: { type: 'text', required: true, values: ['待澄清', '已明确'] },
         progress: { type: 'text', required: true, values: ['未开始', '实施中', '已交付', '已取消'] },
         targets: { type: 'id-list', required: false }
-      }
-    },
-    knowledge: {
-      label: '知识',
-      properties: {
-        project_id: { type: 'id', required: true },
-        applies_to: { type: 'id-list', required: false }
       }
     },
     capability: {
@@ -57,7 +58,7 @@ const testModel = {
   },
   relations: {
     belongs_to: {
-      sourceTypes: ['standard', 'method', 'work_item', 'capability', 'knowledge'],
+      sourceTypes: ['standard', 'method', 'requirement', 'work_item', 'capability'],
       sourceField: 'project_id',
       targetTypes: ['project'],
       targetField: 'ontology_id',
@@ -66,7 +67,7 @@ const testModel = {
       incomingLabel: '项目中的对象'
     },
     applies_to: {
-      sourceTypes: ['standard', 'method', 'knowledge'],
+      sourceTypes: ['standard', 'method'],
       sourceField: 'applies_to',
       targetTypes: ['project', 'capability'],
       targetField: 'ontology_id',
@@ -75,7 +76,7 @@ const testModel = {
       incomingLabel: '适用内容'
     },
     targets: {
-      sourceTypes: ['work_item'],
+      sourceTypes: ['requirement', 'work_item'],
       sourceField: 'targets',
       targetTypes: ['project', 'capability'],
       targetField: 'ontology_id',
@@ -90,6 +91,7 @@ async function createFixture() {
   const root = await mkdtemp(path.join(tmpdir(), 'infohub-cli-test-'));
   await mkdir(path.join(root, 'ontology'), { recursive: true });
   await mkdir(path.join(root, 'docs'), { recursive: true });
+  await mkdir(path.join(root, 'docs', 'archive'), { recursive: true });
 
   await writeFile(
     path.join(root, 'ontology', 'ontology.json'),
@@ -123,15 +125,30 @@ async function createFixture() {
     'utf8'
   );
 
-  // 知识 1 (属于项目 2，applies_to 指向项目 1 的 cap-1)；知识 2 与项目 1 无关
+  // 需求：待澄清且去向未定或进产品要等用户拍板；已明确、交付侧定制和归档的不进该节
   await writeFile(
-    path.join(root, 'docs', 'k1.md'),
-    '---\nontology_id: "k-1"\nontology_type: "knowledge"\ntitle: "校验要放在高成本之前"\nproject_id: "project-2"\napplies_to:\n  - "cap-1"\n---\n# 校验要放在高成本之前\n',
+    path.join(root, 'docs', 'req1.md'),
+    '---\nontology_id: "req-1"\nontology_type: "requirement"\ntitle: "导出报表"\nproject_id: "project-1"\nstatus: "待澄清"\nupdated: "2026-11-01"\n---\n# 导出报表\n',
     'utf8'
   );
   await writeFile(
-    path.join(root, 'docs', 'k2.md'),
-    '---\nontology_id: "k-2"\nontology_type: "knowledge"\ntitle: "无关知识"\nproject_id: "project-2"\n---\n# 无关知识\n',
+    path.join(root, 'docs', 'req2.md'),
+    '---\nontology_id: "req-2"\nontology_type: "requirement"\ntitle: "产品化导出"\nproject_id: "project-1"\nstatus: "待澄清"\ndestination: "进产品"\nupdated: "2026-11-02"\n---\n# 产品化导出\n',
+    'utf8'
+  );
+  await writeFile(
+    path.join(root, 'docs', 'req3.md'),
+    '---\nontology_id: "req-3"\nontology_type: "requirement"\ntitle: "交付定制导出"\nproject_id: "project-1"\nstatus: "待澄清"\ndestination: "交付侧定制"\n---\n# 交付定制导出\n',
+    'utf8'
+  );
+  await writeFile(
+    path.join(root, 'docs', 'req4.md'),
+    '---\nontology_id: "req-4"\nontology_type: "requirement"\ntitle: "已明确需求"\nproject_id: "project-1"\nstatus: "已明确"\n---\n# 已明确需求\n',
+    'utf8'
+  );
+  await writeFile(
+    path.join(root, 'docs', 'archive', 'req5.md'),
+    '---\nontology_id: "req-5"\nontology_type: "requirement"\ntitle: "归档需求"\nproject_id: "project-1"\nstatus: "待澄清"\n---\n# 归档需求\n',
     'utf8'
   );
 
@@ -159,21 +176,21 @@ async function createFixture() {
   // 工作项 1 (实施中)
   await writeFile(
     path.join(root, 'docs', 'work1.md'),
-    '---\nontology_id: "work-1"\nontology_type: "work_item"\ntitle: "重构引擎"\nproject_id: "project-1"\nrequirement: "已明确"\nprogress: "实施中"\ntargets:\n  - "cap-1"\n---\n# 引擎重构内容\n',
+    '---\nontology_id: "work-1"\nontology_type: "work_item"\ntitle: "重构引擎"\nproject_id: "project-1"\nprogress: "实施中"\ntargets:\n  - "cap-1"\n---\n# 引擎重构内容\n',
     'utf8'
   );
 
-  // 工作项 2 (待澄清 / 未开始)
+  // 工作项 2 (未开始)
   await writeFile(
     path.join(root, 'docs', 'work2.md'),
-    '---\nontology_id: "work-2"\nontology_type: "work_item"\ntitle: "新增接口"\nproject_id: "project-1"\nrequirement: "待澄清"\nprogress: "未开始"\n---\n# 接口内容\n',
+    '---\nontology_id: "work-2"\nontology_type: "work_item"\ntitle: "新增接口"\nproject_id: "project-1"\nprogress: "未开始"\n---\n# 接口内容\n',
     'utf8'
   );
 
-  // 工作项 3 (待澄清 / 已取消 -> 不应在进行中列出)
+  // 工作项 3 (已取消 -> 不应在进行中列出)
   await writeFile(
     path.join(root, 'docs', 'work3.md'),
-    '---\nontology_id: "work-3"\nontology_type: "work_item"\ntitle: "废弃特性"\nproject_id: "project-1"\nrequirement: "待澄清"\nprogress: "已取消"\n---\n# 废弃内容\n',
+    '---\nontology_id: "work-3"\nontology_type: "work_item"\ntitle: "废弃特性"\nproject_id: "project-1"\nprogress: "已取消"\n---\n# 废弃内容\n',
     'utf8'
   );
 
@@ -211,7 +228,7 @@ async function runCli(argv, envHome = null) {
   }
 }
 
-test('brief outputs all 4 sections with correct filtering rules', async () => {
+test('brief outputs the five sections with correct filtering rules', async () => {
   const root = await createFixture();
   try {
     // 1. 通过 ID 精确匹配
@@ -229,16 +246,21 @@ test('brief outputs all 4 sections with correct filtering rules', async () => {
     assert.ok(res.stdout.includes('发布流程 — 准备发版时 — docs/method1.md'));
     assert.ok(res.stdout.includes('应急排障 — 未写何时使用 — docs/method2.md'));
 
-    // ④ 进行中的工作: work-1 (实施中) 和 work-2 (待澄清且未交付/未取消)，不含 work-3 (已取消)
-    assert.ok(res.stdout.includes('重构引擎 [已明确/实施中] — docs/work1.md'));
-    assert.ok(res.stdout.includes('新增接口 [待澄清/未开始] — docs/work2.md'));
+    // ④ 进行中的工作只显示 progress: work-1 (实施中) 和 work-2 (未开始)，不含 work-3 (已取消)
+    assert.ok(res.stdout.includes('进行中的工作:'));
+    assert.ok(res.stdout.includes('重构引擎 [实施中] — docs/work1.md'));
+    assert.ok(res.stdout.includes('新增接口 [未开始] — docs/work2.md'));
     assert.ok(!res.stdout.includes('废弃特性'));
 
-    // 知识不进开工说明：要查现成判断用 find --type knowledge
-    assert.ok(!res.stdout.includes('相关知识:'));
-    assert.ok(!res.stdout.includes('校验要放在高成本之前'));
+    // ⑤ 待你拍板的需求: 待澄清且去向未定或进产品，排除已明确、交付侧定制和归档的
+    assert.ok(res.stdout.includes('待你拍板的需求:'));
+    assert.ok(res.stdout.includes('导出报表 [待澄清] — docs/req1.md'));
+    assert.ok(res.stdout.includes('产品化导出 [待澄清] — docs/req2.md'));
+    assert.ok(!res.stdout.includes('交付定制导出'));
+    assert.ok(!res.stdout.includes('已明确需求'));
+    assert.ok(!res.stdout.includes('归档需求'));
 
-    // ⑤ 需关注: 本项目有正文批注的能力
+    // ⑥ 需关注: 本项目有正文批注的能力
     assert.ok(res.stdout.includes('核心计算能力：1 条批注；注意内存泄露 — docs/cap1.md'));
 
     // 2. 通过 title 精确匹配
@@ -286,14 +308,14 @@ test('find filters by type, project, where clauses, text, and handles intersecti
     // 交集过滤
     const resMulti = await runCli([
       '--root', root, 'find',
-      '--type', 'work_item',
-      '--where', 'requirement=待澄清',
-      '--where', 'progress=未开始'
+      '--type', 'requirement',
+      '--where', 'status=待澄清',
+      '--where', 'destination=进产品'
     ]);
     assert.equal(resMulti.code, 0);
-    assert.ok(resMulti.stdout.includes('work-2'));
-    assert.ok(!resMulti.stdout.includes('work-1'));
-    assert.ok(!resMulti.stdout.includes('work-3'));
+    assert.ok(resMulti.stdout.includes('req-2'));
+    assert.ok(!resMulti.stdout.includes('req-1'));
+    assert.ok(!resMulti.stdout.includes('req-3'));
 
     // 文本搜索 (title 或 body)
     const resText = await runCli(['--root', root, 'find', '排障正文']);
@@ -316,7 +338,7 @@ test('around traverses relations with outgoing/incoming direction and path resol
     assert.equal(resId.code, 0);
     assert.ok(resId.stdout.includes('所属项目 (1)'));
     assert.ok(resId.stdout.includes('适用内容 · 规范 (1)'));
-    assert.ok(resId.stdout.includes('相关工作 (1)'));
+    assert.ok(resId.stdout.includes('相关工作 · 工作 (1)'));
 
     // 以 .md 路径解析
     const resPath = await runCli(['--root', root, 'around', 'docs/cap1.md']);
@@ -440,28 +462,33 @@ test('desktop queries share find semantics and expose issues without parsing tex
 
 test('overview projects share unfinished find semantics, expose action items and reload changed documents', async () => {
   const root = await createFixture();
+  const home = await mkdtemp(path.join(tmpdir(), 'home-overview-'));
   try {
-    const result = await runCli(['--root', root, 'overview']);
+    const result = await runCli(['--root', root, 'overview'], home);
     assert.equal(result.code, 0);
     const overview = JSON.parse(result.stdout);
-    const found = JSON.parse((await runCli(['--root', root, 'find', '--type', 'work_item', '--where-not', 'progress=已交付', '--where-not', 'progress=已取消', '--json'])).stdout);
+    const found = JSON.parse((await runCli(['--root', root, 'find', '--type', 'work_item', '--where-not', 'progress=已交付', '--where-not', 'progress=已取消', '--json'], home)).stdout);
     assert.equal(overview.version, 3);
     assert.deepEqual(overview.projects.flatMap(project => project.work), found.objects);
     assert.deepEqual(overview.projects.map(project => project.ongoingCount), [2, 0]);
-    assert.deepEqual(overview.needsAction.map(item => item.object.id), ['work-2']);
+    assert.deepEqual(overview.needsAction.map(item => item.object.id), ['req-1', 'req-2']);
     assert.deepEqual(overview.issues, found.issues);
     await rm(path.join(root, 'docs', 'work2.md'));
     await rm(path.join(root, 'docs', 'cap1.md'));
-    const changed = JSON.parse((await runCli(['--root', root, 'overview'])).stdout);
+    const changed = JSON.parse((await runCli(['--root', root, 'overview'], home)).stdout);
     assert.deepEqual(changed.projects.flatMap(project => project.work).map(o => o.id), ['work-1']);
-    assert.deepEqual(changed.needsAction, []);
+    assert.deepEqual(changed.needsAction.map(item => item.object.id), ['req-1', 'req-2']);
     assert.equal(Object.hasOwn(changed.references, 'work-2'), false);
     assert.equal(Object.hasOwn(changed.references, 'cap-1'), false);
     assert.deepEqual(changed.references['work-1'], { title: '重构引擎', path: 'docs/work1.md' });
     assert.ok(changed.issues.some(issue => issue.path === 'docs/bad.md'));
-    assert.equal((await runCli(['--root', root, 'overview', '--typo'])).code, 1);
+    await rm(path.join(root, 'docs', 'req1.md'));
+    const reloaded = JSON.parse((await runCli(['--root', root, 'overview'], home)).stdout);
+    assert.deepEqual(reloaded.needsAction.map(item => item.object.id), ['req-2']);
+    assert.equal(Object.hasOwn(reloaded.references, 'req-1'), false);
+    assert.equal((await runCli(['--root', root, 'overview', '--typo'], home)).code, 1);
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await Promise.all([root, home].map(p => rm(p, { recursive: true, force: true })));
   }
 });
 
@@ -487,10 +514,10 @@ test('check resolves cwd-relative and absolute paths and rejects missing, outsid
   assert.match(model.stdout, /docs\/bad.md/);
 });
 
-test('brief and overview include every nonterminal work item independent of requirement', async t => {
+test('brief and overview include every nonterminal work item without requirement links', async t => {
   const root = await createFixture();
   t.after(() => rm(root, { recursive: true, force: true }));
-  await writeFile(path.join(root, 'docs/ready.md'), '---\nontology_id: ready\nontology_type: work_item\ntitle: Ready work\nproject_id: project-1\nrequirement: 已明确\nprogress: 未开始\n---\n');
+  await writeFile(path.join(root, 'docs/ready.md'), '---\nontology_id: ready\nontology_type: work_item\ntitle: Ready work\nproject_id: project-1\nprogress: 未开始\n---\n');
   const brief = await runCli(['--root', root, 'brief', 'project-1']);
   const overview = JSON.parse((await runCli(['--root', root, 'overview'])).stdout);
   assert.match(brief.stdout, /Ready work/);

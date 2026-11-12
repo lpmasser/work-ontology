@@ -71,7 +71,6 @@ function buildIndex(notes, model) {
     objects.set(id, {
       id, type: fm.ontology_type, title: fm.title, path,
       ...(fm.progress ? { progress: fm.progress } : {}),
-      ...(fm.kind ? { kind: fm.kind } : {}),
       frontmatter: fm
     });
   }
@@ -166,4 +165,12 @@ export { validateModel, buildIndex, searchAround };
 
 export function isUnfinishedWork(object) {
   return object.type === 'work_item' && !['已交付', '已取消'].includes(object.frontmatter.progress);
+}
+
+export function needsUserDecision(object) {
+  const { status, destination } = object.frontmatter;
+  return object.type === 'requirement'
+    && status === '待澄清'
+    && (destination == null || destination === '' || destination === '进产品')
+    && !object.path.split('/').includes('archive');
 }

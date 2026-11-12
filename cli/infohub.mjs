@@ -5,7 +5,7 @@ import { realpathSync } from 'node:fs';
 import { configureRuntime, readConfig } from '../core/runtime.mjs';
 import { loadVault } from '../core/vault.mjs';
 import { buildOverview } from '../core/overview.mjs';
-import { isUnfinishedWork } from '../core/engine.js';
+import { isUnfinishedWork, needsUserDecision } from '../core/engine.js';
 import { resolveProject, filterObjects, queryFind, queryGet, queryAround } from '../core/query.mjs';
 import { checkPaths, selectIssues, annotationIssuesOutsideModel } from '../core/validation.mjs';
 import { annotationSummary } from '../core/annotations.mjs';
@@ -86,14 +86,23 @@ async function handleBrief(vault, target, root, config) {
   pushWithUseWhen('适用规范', relatedOfType('standard'));
   pushWithUseWhen('工作方法', relatedOfType('method'));
 
-  // 知识按项目归属几乎全部命中，列进开工说明只会淹没上面两节；要查现成判断用 find --type knowledge
-
   const workItems = filterObjects(vault, { projectId }).filter(isUnfinishedWork);
 
   output.push('\n进行中的工作:');
   if (workItems.length) {
     for (const w of workItems) {
-      output.push(`${w.title} [${w.frontmatter.requirement}/${w.frontmatter.progress}] — ${location(w)}`);
+      output.push(`${w.title} [${w.frontmatter.progress}] — ${location(w)}`);
+    }
+  } else {
+    output.push('无');
+  }
+
+  const waitingRequirements = filterObjects(vault, { projectId }).filter(needsUserDecision);
+
+  output.push('\n待你拍板的需求:');
+  if (waitingRequirements.length) {
+    for (const r of waitingRequirements) {
+      output.push(`${r.title} [${r.frontmatter.status}] — ${location(r)}`);
     }
   } else {
     output.push('无');

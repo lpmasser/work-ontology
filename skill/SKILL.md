@@ -1,6 +1,6 @@
 ---
 name: infohub
-description: "查询 InfoHub 本体：开工时取项目开工说明（适用规范、工作方法及何时使用、进行中的工作、需关注），按类型/项目/属性/文本查找对象，沿关系 Search Around，校验改过的文档。需要查 InfoHub 时用它，代替 grep。"
+description: "查询 InfoHub 本体：开工时取项目开工说明（适用规范、工作方法及何时使用、进行中的工作、待你拍板的需求、需关注），按类型/项目/属性/文本查找对象，沿关系 Search Around，校验改过的文档。需要查 InfoHub 时用它，代替 grep。"
 ---
 
 # InfoHub 命令行

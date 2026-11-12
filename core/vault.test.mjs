@@ -34,7 +34,6 @@ const minimalModel = {
       label: '工作',
       properties: {
         project_id: { type: 'id', required: true },
-        requirement: { type: 'text', required: true, values: ['待澄清', '已明确'] },
         progress: { type: 'text', required: true, values: ['未开始', '实施中', '已交付', '已取消'] }
       }
     },
@@ -100,7 +99,7 @@ async function createFixtureVault() {
 
   await writeFile(
     path.join(root, 'docs', 'work.md'),
-    '---\nontology_id: "work_item-1"\nontology_type: "work_item"\ntitle: "CLI开发"\nproject_id: "project-1"\nrequirement: "已明确"\nprogress: "实施中"\n---\n# 工作正文\n',
+    '---\nontology_id: "work_item-1"\nontology_type: "work_item"\ntitle: "CLI开发"\nproject_id: "project-1"\nprogress: "实施中"\n---\n# 工作正文\n',
     'utf8'
   );
 
