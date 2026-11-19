@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { existsSync } from 'node:fs';
-import { lstat, readlink, mkdir, symlink, writeFile, readFile, realpath, unlink } from 'node:fs/promises';
+import { lstat, readlink, readdir, mkdir, symlink, writeFile, readFile, realpath, unlink } from 'node:fs/promises';
 import { homedir, platform } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -125,10 +125,15 @@ export async function installCli(rootArg, userHome = homedir(), repository, web 
   // 2. 常驻指令（在链接 Skill 之前，以免链接步骤建出的目录被误当成已安装的 harness）
   await writeResident(root, userHome);
 
-  // 3. 两个 Skill 使用同一机制，只链接已安装的 harness。
+  // 3. Skill 链接：infohub 来自工具仓，其余扫 InfoHub/skills/ 全目录，只链接已安装的 harness。
   const netcattySkill = path.join(root, 'skills/netcatty-ssh');
   npm(['ci', '--ignore-scripts', '--omit=optional', '--no-audit', '--no-fund'], { cwd: netcattySkill, stdio: 'inherit' });
-  const skills = [['infohub', skillDir], ['netcatty-ssh', netcattySkill]];
+  const skills = [['infohub', skillDir]];
+  for (const entry of await readdir(path.join(root, 'skills'))) {
+    if (entry.startsWith('.') || entry === 'infohub') continue;
+    const source = path.join(root, 'skills', entry);
+    if (existsSync(path.join(source, 'SKILL.md'))) skills.push([entry, source]);
+  }
   for (const [harness, directory] of SKILL_TARGETS) {
     if (!existsSync(path.join(userHome, harness))) continue;
     for (const [name, source] of skills) await linkSkill(source, path.join(userHome, directory, name));
