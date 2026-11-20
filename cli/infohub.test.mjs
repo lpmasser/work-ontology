@@ -6,6 +6,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { main } from './infohub.mjs';
 
+// 这些用例自己决定用哪个 codexhost：不先清掉调用方 shell 里的入口，
+// brief/check 会去拉起真实的活动循环，往临时目录里写字。
+const ambientCli = process.env.CODEXHOST_CLI_PATH;
+delete process.env.CODEXHOST_CLI_PATH;
+process.on('exit', () => { if (ambientCli !== undefined) process.env.CODEXHOST_CLI_PATH = ambientCli; });
+
 const testModel = {
   folders: ['ontology', 'docs'],
   primaryKey: 'ontology_id',
@@ -759,4 +765,28 @@ test('a fresh background result answers the query without calling codexhost; a s
   const observed = JSON.parse((await runCli(['--root', f.root, 'activity', 'work-a', '--json'])).stdout);
   assert.equal(observed.source, '本次观察');
   assert.deepEqual(observed.conclusions.map(conclusion => conclusion.text), ['已在本地提交 486a69581。']);
+});
+
+test('activity shows the last observation error and how long ago it last succeeded', async t => {
+  const f = await activityFixture(t);
+  await withFakeCodexhost(t, f.cli);
+  const file = path.join(f.root, '.git/infohub-activity/state.json');
+  const state = JSON.parse(await readFile(file, 'utf8'));
+  const observedAt = new Date(Date.now() - 8 * 60_000).toISOString();
+  await writeFile(path.join(f.root, '.git/infohub-activity/activity.pid'), String(process.pid));
+  await writeFile(path.join(f.root, '.git/infohub-activity/result.json'), JSON.stringify({
+    observedAt, works: [{ id: 'work-a', title: '面板化线', owner: OWNER, path: 'docs/work.md', from: null }],
+    exceptions: [], rounds: [], conclusions: []
+  }));
+  await writeFile(file, JSON.stringify({
+    ...state, error: '第 3 次观察失败：codexhost thread watches: null', lastSuccessAt: observedAt, failures: 3
+  }));
+
+  const off = await runCli(['--root', f.root, 'activity', 'work-a']);
+  assert.equal(off.code, 0, off.stderr);
+  assert.match(off.stdout, /最近错误 第 3 次观察失败：codexhost thread watches: null/);
+  assert.match(off.stdout, new RegExp(`后台上次成功观察 ${observedAt}（\\d+ 秒前）`));
+  const json = JSON.parse((await runCli(['--root', f.root, 'activity', 'work-a', '--json'])).stdout);
+  assert.equal(json.error, '第 3 次观察失败：codexhost thread watches: null');
+  assert.equal(json.lastSuccessAt, observedAt);
 });

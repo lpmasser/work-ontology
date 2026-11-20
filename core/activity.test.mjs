@@ -337,3 +337,33 @@ test('a watch notice to the dispatcher does not count as the named recipient pic
   assert.equal(deliver[0].recipient, D);
   assert.equal(result.state.turns[`${EXECUTOR}#1`].pickedUp, false);
 });
+
+test('a busy recipient is reported as busy instead of unclaimed, and is never escalated while it runs', () => {
+  const owner = work('work-a', C1);
+  const delivered = turn(1, { sender: C1, reply: '交件' });
+  const d = { id: '44444444-4444-4444-4444-444444444444', title: 'S1' };
+  const watches = [{ threadId: EXECUTOR, notifyThreadId: d.id, turnId: delivered.turnId }];
+  const state = {
+    observedAt: '2026-11-21T07:10:00.000Z',
+    threads: { [EXECUTOR]: { updatedAt: '2026-11-21T06:40:00.000Z', seenThrough: 1 }, [d.id]: { updatedAt: '2026-11-21T07:00:00.000Z', seenThrough: 148 } },
+    turns: { [`${EXECUTOR}#1`]: { workId: 'work-a', dispatcher: C1, floor: 148, terminalAt: '2026-11-21T06:40:00.000Z', pickedUp: false } },
+    reminded: [{ key: `deliver:${EXECUTOR}#1`, recipient: D, at: '2026-11-21T07:00:00.000Z', floor: 148 }]
+  };
+  const busy = judge([owner, work('work-b', D)], [thread([delivered]), thread([turn(149, { sender: C1, status: 'running' })], { ...d, status: 'running' })],
+    { now: new Date('2026-11-21T07:10:00.000Z'), state, watches });
+  const open = busy.exceptions.filter(exception => exception.kind === 'deliver');
+  assert.equal(open.length, 1);
+  assert.equal(open[0].busy, 149);
+  assert.match(open[0].detail, /接手人在忙（第 149 轮在跑），等这一轮结束再提醒/);
+  assert.deepEqual(busy.exceptions.filter(exception => exception.kind === 'escalate'), [], '忙着的时候不升级');
+  assert.equal(busy.settled, false, '仍等这一轮结束');
+
+  // 这一轮结束后按原来的规则提醒一次，之后才轮到升级。
+  const finished = judge([owner, work('work-b', D)], [thread([delivered]), thread([turn(149, { sender: C1, reply: '做完了' })], { ...d, status: 'completed' })],
+    { now: new Date('2026-11-21T07:11:00.000Z'), state: busy.state, watches });
+  const after = finished.exceptions.filter(exception => exception.kind === 'deliver' && exception.key === `deliver:${EXECUTOR}#1`);
+  assert.equal(after.length, 1);
+  assert.equal(after[0].busy, undefined);
+  assert.match(after[0].detail, /五分钟未接/);
+  assert.equal(finished.exceptions.filter(exception => exception.kind === 'escalate' && exception.key === `escalate:${EXECUTOR}#1`).length, 1, '老提醒已过五分钟，这一轮可以升级');
+});

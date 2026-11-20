@@ -193,3 +193,33 @@ test('without a local codexhost CLI the activity loop is not started at all', as
   await ensureActivity(f.root, { cli: undefined });
   await assert.rejects(stat(await activityHome(f.root)), { code: 'ENOENT' });
 });
+
+test('a failed observation is recorded and the next interval recovers instead of exiting', async t => {
+  const f = await workspace(t);
+  await fixtures(f);
+  await write(f.cli, 'fail.json', ['watches']);
+  let minute = 0;
+  const clock = () => new Date(Date.parse(T0) + minute++ * 60_000);
+  const abort = new AbortController();
+  t.after(() => abort.abort());
+  const running = runActivity(f.root, { cli: FAKE, intervalMs: 5, clock, signal: abort.signal });
+  let failure;
+  running.catch(error => { failure = error; });
+
+  const failed = await until(async () => (await readActivityState(f.root)).error, '失败的观察没有写进状态');
+  assert.match(failed, /第 1 次观察失败：.*thread watches/);
+  assert.equal((await readActivityState(f.root)).running, true, '循环没有退出');
+  assert.deepEqual(await sent(f.cli), []);
+
+  // Host 恢复后下一个间隔照常观察，错误清掉，交件照原规则提醒。
+  await write(f.cli, 'fail.json', []);
+  await until(async () => (await readActivityState(f.root)).lastSuccessAt, '下一轮没有恢复');
+  assert.equal((await readActivityState(f.root)).error, null);
+  assert.equal((await readActivityState(f.root)).failures, 0);
+  await finishRound(f, new Date(Date.parse(T0) + 60_000).toISOString());
+  const reminder = await until(async () => (await sent(f.cli))[0], '恢复后没有提醒接手人');
+  assert.equal(reminder.threadId, D.slice('codex://threads/'.length));
+  abort.abort();
+  await running;
+  assert.equal(failure, undefined);
+});

@@ -14,7 +14,8 @@ function call(cli, args) {
   return new Promise((resolve, reject) => {
     const child = spawn(cli, args, { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     const out = [], errors = [];
-    const timer = setTimeout(() => child.kill('SIGKILL'), 60000);
+    // Host 忙时单次调用可能很慢；超时只让这一轮观察失败，循环下一个间隔再来。
+    const timer = setTimeout(() => child.kill('SIGKILL'), 180000);
     child.stdout.on('data', chunk => out.push(chunk));
     child.stderr.on('data', chunk => errors.push(chunk));
     child.once('error', reject);

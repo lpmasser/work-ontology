@@ -6,7 +6,7 @@ import { configureRuntime, readConfig } from '../core/runtime.mjs';
 import { loadVault } from '../core/vault.mjs';
 import { buildOverview } from '../core/overview.mjs';
 import { isUnfinishedWork, needsUserDecision } from '../core/engine.js';
-import { currentOwners, describeWork, threadLink, judgeActivity, formatActivity, formatExceptions, formatErrors } from '../core/activity.mjs';
+import { currentOwners, describeWork, threadLink, judgeActivity, formatActivity, formatExceptions, formatErrors, formatHealth } from '../core/activity.mjs';
 import { findActivityCli as locateActivityCli } from '../activity/codexhost.mjs';
 import { observeActivity } from '../activity/observe.mjs';
 import { ensureActivity, runActivity, readActivityResult } from '../activity/loop.mjs';
@@ -210,10 +210,13 @@ async function handleActivity(root, args, index, cli) {
     result = judgeActivity(index, { threads: snapshot.threads, watches: snapshot.watches, now: new Date(), state });
     unreadable = snapshot.errors;
   }
-  const errors = formatErrors(unreadable);
+  // 健康信息描述后台循环：查询自己观察成功不代表循环恢复了。
+  const lastSuccessAt = state.lastSuccessAt ?? null;
+  const health = formatHealth({ error: state.error, lastSuccessAt });
+  const notes = [health, formatErrors(unreadable)].filter(Boolean).join('\n');
   const head = {
     version: 1, enabled: true, running: state.running, error: state.error ?? null,
-    observedAt: result.observedAt, source, unreadable,
+    lastSuccessAt, observedAt: result.observedAt, source, unreadable,
   };
   const section = work => ({
     work,
@@ -227,20 +230,20 @@ async function handleActivity(root, args, index, cli) {
   });
 
   if (flags.includes('--exceptions')) {
-    console.log(asJson ? JSON.stringify({ ...head, exceptions: result.exceptions }) : [formatExceptions(result, source), errors].filter(Boolean).join('\n'));
+    console.log(asJson ? JSON.stringify({ ...head, exceptions: result.exceptions }) : [formatExceptions(result, source), notes].filter(Boolean).join('\n'));
     return 0;
   }
 
   const target = args.find(arg => !arg.startsWith('--'));
   if (target) {
     const shown = section(describeWork(index, target));
-    console.log(asJson ? JSON.stringify({ ...head, ...shown }) : [block(shown.work), errors].filter(Boolean).join('\n'));
+    console.log(asJson ? JSON.stringify({ ...head, ...shown }) : [block(shown.work), notes].filter(Boolean).join('\n'));
     return 0;
   }
   const works = callingWorks(index);
   console.log(asJson
     ? JSON.stringify({ ...head, works: works.map(section) })
-    : [...works.map(work => block(work)), errors].filter(Boolean).join('\n\n'));
+    : [...works.map(work => block(work)), notes].filter(Boolean).join('\n\n'));
   return 0;
 }
 

@@ -94,7 +94,7 @@ async function remind(cli, index, result) {
   const nowMs = Date.parse(result.observedAt);
   const groups = new Map();
   for (const exception of result.exceptions) {
-    if (exception.blocking || exception.reminded) continue;
+    if (exception.blocking || exception.reminded || exception.busy) continue;
     if (!groups.has(exception.recipient)) groups.set(exception.recipient, []);
     groups.get(exception.recipient).push(exception);
   }
@@ -137,6 +137,18 @@ async function tick(root, cli, state, clock, cache) {
   return result;
 }
 
+function pause(intervalMs, signal) {
+  return new Promise(resolve => {
+    const finish = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, intervalMs);
+    signal?.addEventListener('abort', finish, { once: true });
+  });
+}
+
 export async function runActivity(root, { cli = process.env.INFOHUB_ACTIVITY_CLI, intervalMs = ACTIVITY_INTERVAL_MS, clock = () => new Date(), signal } = {}) {
   if (!cli) throw new Error('没有 codexhost CLI，活动检查未启用');
   const dir = await activityHome(root);
@@ -153,9 +165,14 @@ export async function runActivity(root, { cli = process.env.INFOHUB_ACTIVITY_CLI
       try {
         result = await tick(root, cli, state, clock, cache);
       } catch (error) {
-        await save(stateFile, { ...state, error: `${iso()} ${error.message}` });
-        throw error;
+        // 这一轮观察失败：写清错误，沿用上一份状态，下一个间隔照常再观察。
+        const failures = (state.failures ?? 0) + 1;
+        await save(stateFile, { ...state, failures, error: `第 ${failures} 次观察失败：${error.message}` });
+        await pause(intervalMs, signal);
+        continue;
       }
+      result.state.lastSuccessAt = result.observedAt;
+      result.state.failures = 0;
       await save(stateFile, result.state);
       await save(resultFile, {
         observedAt: result.observedAt, works: result.works,
@@ -165,15 +182,7 @@ export async function runActivity(root, { cli = process.env.INFOHUB_ACTIVITY_CLI
         console.log(`${iso()} 各轮已停且交件结清，退出活动检查`);
         return;
       }
-      await new Promise(resolve => {
-        const timer = setTimeout(finish, intervalMs);
-        function finish() {
-          clearTimeout(timer);
-          signal?.removeEventListener('abort', finish);
-          resolve();
-        }
-        signal?.addEventListener('abort', finish, { once: true });
-      });
+      await pause(intervalMs, signal);
     }
   } finally { await release(); }
 }

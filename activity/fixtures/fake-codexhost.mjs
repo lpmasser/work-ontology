@@ -17,6 +17,12 @@ await mkdir(dir, { recursive: true });
 await appendFile(path.join(dir, 'calls.log'), `${argv.join(' ')}\n`);
 
 if (argv[0] !== 'thread') throw new Error(`fake codexhost: 未知命令 ${argv.join(' ')}`);
+// fail.json 列出要失败的子命令（list/read/watches/send），模拟 Host 忙到超时。
+const failing = await load('fail.json', []);
+if (failing.includes(argv[1])) {
+  process.stderr.write(`${JSON.stringify({ error: { code: 'TIMEOUT', message: `fake codexhost: ${argv[1]} 失败` } })}\n`);
+  process.exit(1);
+}
 const id = argv[2];
 if (argv[1] === 'list') print(await load('threads.json', { threads: [], nextCursor: null }));
 else if (argv[1] === 'watches') print(await load('watches.json', { watches: [] }));

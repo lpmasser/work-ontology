@@ -78,6 +78,13 @@ function pickedUpBy(thread, executorId, floor) {
     && mentioned.some(link => (turn.messages.find(message => message.role === 'user')?.text ?? '').includes(link)));
 }
 
+// 接手人这一轮还在跑：提醒会撞上忙、按设计不打断它，等它结束再提醒。
+function busyRound(thread) {
+  if (!thread || thread.status !== 'running') return null;
+  const ongoing = thread.turns.filter(turn => !STOPPED.includes(turn.status));
+  return ongoing.length ? Math.max(...ongoing.map(turn => turn.turnNumber)) : maxTurn(thread) || null;
+}
+
 function workOf(index, id) {
   const object = index.objects.get(id);
   return object ? {
@@ -185,10 +192,16 @@ export function judgeActivity(index, { threads, watches = [], now = new Date(), 
         if (escalated) entry.pickedUp = pickedUpBy(threadById.get(threadId(escalated.recipient)), thread.threadId, escalated.floor ?? entry.floor);
       }
       if (entry.pickedUp) continue;
-      const delivery = { ...base, recipient, since: entry.terminalAt };
+      const busy = busyRound(threadById.get(threadId(recipient)));
+      const delivery = { ...base, recipient, since: entry.terminalAt, ...(busy ? { busy } : {}) };
+      if (busy) {
+        exceptions.push({ key: `deliver:${key}`, kind: 'deliver', ...delivery, detail: `接手人在忙（第 ${busy} 轮在跑），等这一轮结束再提醒` });
+        continue;
+      }
       if (nowMs - Date.parse(entry.terminalAt) >= DELIVERY_GRACE_MS) {
         exceptions.push({ key: `deliver:${key}`, kind: 'deliver', ...delivery, detail: `第 ${turn.turnNumber} 轮交付后五分钟未接` });
       }
+      // 接手人忙的时候不升级：等它这一轮结束，再按原来的规则提醒一次。
       const sent = reminded.find(item => item.key === `deliver:${key}` && item.recipient === recipient);
       if (sent && nowMs - Date.parse(sent.at) >= DELIVERY_GRACE_MS) {
         // 接手人先动，派活人只接升级：升级只找派这一轮活的会话一次。
@@ -295,6 +308,14 @@ export function formatExceptions(result, source = '本次观察') {
   const window = windowText(result.works[0]?.from, result.observedAt, source);
   if (!result.exceptions.length) return `未结例外 · ${window}\n无`;
   return [`未结例外 · ${window}`, ...result.exceptions.map(exception => `  ${situationLine(exception)}`)].join('\n');
+}
+
+// 循环的健康状况：最近一次错误，以及距上次观察成功过了多久。
+export function formatHealth({ error, lastSuccessAt }, now = new Date()) {
+  const lines = [];
+  if (error) lines.push(`最近错误 ${error}`);
+  if (lastSuccessAt) lines.push(`后台上次成功观察 ${lastSuccessAt}（${Math.round((now.getTime() - Date.parse(lastSuccessAt)) / 1000)} 秒前）`);
+  return lines.length ? lines.join('\n') : null;
 }
 
 export function formatErrors(errors) {
