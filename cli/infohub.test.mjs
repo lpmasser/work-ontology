@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, readFile, copyFile, symlink } from 'node:fs/promises';
+import { findExecutable } from '../core/runtime.mjs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { main } from './infohub.mjs';
@@ -45,6 +46,7 @@ const testModel = {
       properties: {
         project_id: { type: 'id', required: true },
         progress: { type: 'text', required: true, values: ['未开始', '实施中', '已交付', '已取消'] },
+        owner_thread: { type: 'text', required: false },
         targets: { type: 'id-list', required: false }
       }
     },
@@ -570,4 +572,113 @@ test('configured links cover CLI text/JSON and brief annotations; webUser exclud
   const outside = path.join(root, 'outside.md');
   await writeFile(outside, '<!-- 批注 2026-02-30 agent：bad -->\n');
   const checked = await runCli(['check', outside], home); assert.equal(checked.code, 1); assert.match(checked.stdout, /第 1 行批注格式错误.*日期/);
+});
+
+const OWNER = 'codex://threads/11111111-1111-1111-1111-111111111111';
+const NEXT = 'codex://threads/44444444-4444-4444-4444-444444444444';
+const EXECUTOR = '55555555-5555-5555-5555-555555555555';
+const FAKE_CODEXHOST = path.resolve(import.meta.dirname, '../activity/fixtures/fake-codexhost.mjs');
+const T0 = '2026-01-05T06:40:00.000Z';
+
+async function activityFixture(t) {
+  const home = await mkdtemp(path.join(tmpdir(), 'infohub activity-cli-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const root = path.join(home, 'vault'), cli = path.join(home, 'codexhost');
+  await mkdir(path.join(cli, 'read'), { recursive: true });
+  await mkdir(path.join(root, 'ontology'), { recursive: true });
+  await mkdir(path.join(root, 'docs'), { recursive: true });
+  await mkdir(path.join(root, '.git'), { recursive: true });
+  await writeFile(path.join(root, 'ontology/ontology.json'), JSON.stringify({
+    folders: ['docs'], primaryKey: 'ontology_id',
+    properties: { ontology_id: { type: 'text', required: true }, ontology_type: { type: 'text', required: true }, title: { type: 'text', required: true } },
+    objectTypes: { work_item: { label: '工作', properties: { progress: { type: 'text', required: true, values: ['未开始', '实施中', '已交付', '已取消'] }, owner_thread: { type: 'text', required: false } } } },
+    relations: {}
+  }));
+  const work = owner => `---\nontology_id: "work-a"\nontology_type: "work_item"\ntitle: "面板化线"\nprogress: "实施中"\n${owner ? `owner_thread: "${owner}"\n` : ''}---\n`;
+  await writeFile(path.join(root, 'docs/work.md'), work(OWNER));
+  const write = (name, value) => writeFile(path.join(cli, name), `${JSON.stringify(value, null, 2)}\n`);
+  const turn = { turnId: 'turn-1', turnNumber: 1, status: 'completed', messages: [{ role: 'user', text: `派给你\n\nSender: ${OWNER}` }, { role: 'agent', phase: 'final', text: '已在本地提交 486a69581。' }] };
+  await write('threads.json', { threads: [
+    { threadId: EXECUTOR, title: 'C2 线', status: 'completed', updatedAt: T0 },
+    { threadId: '44444444-4444-4444-4444-444444444444', title: 'D', status: 'completed', updatedAt: T0 }
+  ], nextCursor: null });
+  await write(`read/${EXECUTOR}.json`, { threadId: EXECUTOR, title: 'C2 线', status: 'completed', from: 1, to: 1, totalTurns: 1, turns: [turn], pendingQuestions: [] });
+  await write('read/44444444-4444-4444-4444-444444444444.json', { threadId: '44444444-4444-4444-4444-444444444444', title: 'D', status: 'completed', from: null, to: null, totalTurns: 0, turns: [], pendingQuestions: [] });
+  await write('watches.json', { watches: [{ threadId: EXECUTOR, notifyThreadId: '44444444-4444-4444-4444-444444444444', state: 'watching', turnId: 'turn-1', outcome: 'completed' }] });
+  return { root, cli, work };
+}
+
+async function withFakeCodexhost(t, cli) {
+  const before = { cli: process.env.CODEXHOST_CLI_PATH, dir: process.env.FAKE_CODEXHOST_DIR };
+  process.env.CODEXHOST_CLI_PATH = FAKE_CODEXHOST;
+  process.env.FAKE_CODEXHOST_DIR = cli;
+  t.after(() => {
+    if (before.cli === undefined) delete process.env.CODEXHOST_CLI_PATH; else process.env.CODEXHOST_CLI_PATH = before.cli;
+    if (before.dir === undefined) delete process.env.FAKE_CODEXHOST_DIR; else process.env.FAKE_CODEXHOST_DIR = before.dir;
+  });
+}
+
+test('owner_thread passes only as a complete thread link on a work item', async t => {
+  const f = await activityFixture(t);
+  const check = () => runCli(['--root', f.root, 'check', path.join(f.root, 'docs/work.md')]);
+  assert.equal((await check()).code, 0);
+  for (const [label, owner] of [['bare', '55555555-5555-5555-5555-555555555555'], ['note', `${OWNER}（主控）`], ['list', '[x]']]) {
+    await writeFile(path.join(f.root, 'docs/work.md'), f.work(label === 'list' ? '[x]' : owner));
+    const bad = await check();
+    assert.equal(bad.code, 1, label);
+    assert.match(bad.stdout, /docs\/work\.md：owner_thread 必须是完整的会话链接/, label);
+  }
+  await writeFile(path.join(f.root, 'docs/work.md'), `---\nontology_id: "work-a"\nontology_type: "work_item"\ntitle: "面板化线"\nprogress: "实施中"\nowner_thread: ""\n---\n`);
+  assert.match((await check()).stdout, /owner_thread 必须是完整的会话链接/);
+  await writeFile(path.join(f.root, 'docs/work.md'), `---\nontology_id: "work-a"\nontology_type: "work_item"\ntitle: "面板化线"\nprogress: "实施中"\n---\n`);
+  assert.equal((await check()).code, 0);
+});
+
+test('activity shows the current owner, the open exception and new conclusions without sending anything', async t => {
+  const f = await activityFixture(t);
+  await withFakeCodexhost(t, f.cli);
+
+  const text = await runCli(['--root', f.root, 'activity', 'work-a']);
+  assert.equal(text.code, 0);
+  assert.match(text.stdout, /面板化线 · (未观察|\d\d:\d\d)–\d\d:\d\d（观察 \d{4}-\d\d-\d\dT\d\d:\d\d[^）]*）/);
+  assert.match(text.stdout, new RegExp(`C2 线 #1 → ${NEXT.replaceAll('/', '\\/')}，第 1 轮交付后五分钟未接`));
+  assert.match(text.stdout, /C2 线 #1〔执行者报告〕“已在本地提交 486a69581。”〔codex:\/\/threads\/5555/);
+
+  const first = JSON.parse((await runCli(['--root', f.root, 'activity', 'work-a', '--json'])).stdout);
+  assert.equal(first.enabled, true);
+  assert.equal(first.work.owner, OWNER);
+  assert.deepEqual(first.conclusions.map(conclusion => conclusion.isNew), [false], '读过一次的结论不再算新增');
+
+  const exceptions = JSON.parse((await runCli(['--root', f.root, 'activity', '--exceptions', '--json'])).stdout);
+  assert.deepEqual(exceptions.exceptions.map(exception => [exception.kind, exception.recipient]), [['deliver', NEXT]]);
+
+  const missed = await runCli(['--root', f.root, 'activity', 'work-missing']);
+  assert.equal(missed.code, 1);
+  assert.match(missed.stderr, /找不到工作对象/);
+
+  await assert.rejects(readFile(path.join(f.cli, 'sent.jsonl'), 'utf8'), { code: 'ENOENT' }, '只读查询不发消息');
+});
+
+test('activity reports itself as not enabled when this machine has no codexhost CLI', async t => {
+  const f = await activityFixture(t);
+  const before = { cli: process.env.CODEXHOST_CLI_PATH, path: process.env.PATH };
+  // PATH 里只留 Git，模拟没有 codexhost CLI 的机器。
+  const bin = path.join(f.root, 'bin');
+  await mkdir(bin);
+  const gitPath = findExecutable('git');
+  if (process.platform === 'win32') await copyFile(gitPath, path.join(bin, path.basename(gitPath)));
+  else await symlink(gitPath, path.join(bin, 'git'));
+  delete process.env.CODEXHOST_CLI_PATH;
+  process.env.PATH = bin;
+  t.after(() => {
+    if (before.cli !== undefined) process.env.CODEXHOST_CLI_PATH = before.cli;
+    process.env.PATH = before.path;
+  });
+  const off = await runCli(['--root', f.root, 'activity']);
+  assert.equal(off.code, 0);
+  assert.match(off.stdout, /活动检查未启用：本机没有 codexhost CLI/);
+  const offJson = JSON.parse((await runCli(['--root', f.root, 'activity', '--json'])).stdout);
+  assert.deepEqual(offJson, { version: 1, enabled: false });
+  const checked = await runCli(['--root', f.root, 'check', path.join(f.root, 'docs/work.md')]);
+  assert.equal(checked.code, 0, '没有 codexhost 时原有校验照常可用');
 });

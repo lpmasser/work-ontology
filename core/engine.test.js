@@ -299,3 +299,29 @@ test('one source type and foreign-key field cannot be assigned to multiple relat
   };
   assert.throws(() => validateModel(schema), /无效关系映射：also_targets.*work_item\.targets.*targets/);
 });
+
+test('owner_thread accepts only a complete thread link on work items', () => {
+  const link = 'codex://threads/debe5f7d-8d1d-4c1a-8796-405b8bbce2f5';
+  const accepted = () => buildIndex([note('work', 'work_item', { owner_thread: link }),
+    note('cap', 'capability')], model);
+  assert.deepEqual(accepted().issues, []);
+  assert.deepEqual(buildIndex([note('work', 'work_item')], model).issues, []);
+
+  const rejected = [
+    ['work-item-empty', { owner_thread: '' }],
+    ['work-item-list', { owner_thread: [link] }],
+    ['work-item-bare', { owner_thread: 'debe5f7d-8d1d-4c1a-8796-405b8bbce2f5' }],
+    ['work-item-note', { owner_thread: `${link}（主控）` }],
+    ['work-item-short', { owner_thread: 'codex://threads/debe5f7d' }]
+  ];
+  for (const [label, properties] of rejected) {
+    const result = buildIndex([note('work', 'work_item', properties)], model);
+    assert.equal(result.issues.length, 1, label);
+    assert.match(result.issues[0].message, /owner_thread.*codex:\/\/threads/, label);
+    assert.equal(result.objects.has('work'), false, label);
+  }
+  const wrongType = buildIndex([note('cap', 'capability', { owner_thread: link })], model);
+  assert.equal(wrongType.issues.length, 1);
+  assert.equal(wrongType.issues[0].path, 'cap.md');
+  assert.match(wrongType.issues[0].message, /owner_thread 只能用于 work_item/);
+});

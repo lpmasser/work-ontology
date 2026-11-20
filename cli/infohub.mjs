@@ -6,6 +6,10 @@ import { configureRuntime, readConfig } from '../core/runtime.mjs';
 import { loadVault } from '../core/vault.mjs';
 import { buildOverview } from '../core/overview.mjs';
 import { isUnfinishedWork, needsUserDecision } from '../core/engine.js';
+import { currentOwners, describeWork, threadLink, judgeActivity, formatActivity, formatExceptions, formatErrors } from '../core/activity.mjs';
+import { findActivityCli as locateActivityCli } from '../activity/codexhost.mjs';
+import { observeActivity } from '../activity/observe.mjs';
+import { ensureActivity, runActivity, readActivityState, saveActivityState } from '../activity/loop.mjs';
 import { resolveProject, filterObjects, queryFind, queryGet, queryAround } from '../core/query.mjs';
 import { checkPaths, selectIssues, annotationIssuesOutsideModel } from '../core/validation.mjs';
 import { annotationSummary } from '../core/annotations.mjs';
@@ -22,6 +26,7 @@ const USAGE = `用法: infohub <命令> [参数...]
   around <ID或路径>... [--relation <关系>] [--direction outgoing|incoming] 查询关联对象
   get <ID或路径>                                             获取对象路径与全部属性
   check [路径...]                                           校验对象与模型（有错误退出码 1）
+  activity [工作 ID] [--json] [--exceptions]                看现任、未结例外和新增轮末结论（由 brief/check 拉起活动检查）
   sync run|status|logs                               前台同步或查看状态（brief/check 按需启动；服务器由 Docker 托管）
   help                                                     显示帮助信息
 
@@ -177,6 +182,61 @@ async function handleGet(vault, target, json, config) {
   }
 }
 
+function callingWork(index) {
+  const caller = process.env.CODEXHOST_THREAD_ID;
+  const mine = caller ? currentOwners(index).find(work => work.owner === threadLink(caller)) : null;
+  if (!mine) throw new Error('活动查询需要在负责会话里运行，或显式给出工作 ID');
+  return describeWork(index, mine.id);
+}
+
+async function handleActivity(root, args, index, cli) {
+  const flags = args.filter(arg => arg.startsWith('--'));
+  const unknown = flags.filter(flag => !['--json', '--exceptions'].includes(flag));
+  if (unknown.length) throw new Error(`activity 未知选项：${unknown.join('、')}`);
+  const asJson = flags.includes('--json');
+  if (!cli) {
+    console.log(asJson ? JSON.stringify({ version: 1, enabled: false }) : '活动检查未启用：本机没有 codexhost CLI');
+    return 0;
+  }
+
+  const state = await readActivityState(root);
+  const snapshot = await observeActivity(cli, { index, state });
+  const result = judgeActivity(index, { threads: snapshot.threads, watches: snapshot.watches, now: new Date(), state });
+  const head = {
+    version: 1, enabled: true, running: state.running, error: state.error ?? null,
+    observedAt: result.observedAt, unreadable: snapshot.errors,
+  };
+  const errors = formatErrors(snapshot.errors);
+
+  if (flags.includes('--exceptions')) {
+    console.log(asJson ? JSON.stringify({ ...head, exceptions: result.exceptions }) : [formatExceptions(result), errors].filter(Boolean).join('\n'));
+    return 0;
+  }
+
+  const target = args.find(arg => !arg.startsWith('--'));
+  const work = target ? describeWork(index, target) : callingWork(index);
+  const shown = {
+    ...head, work,
+    exceptions: result.exceptions.filter(exception => exception.workId === work.id),
+    rounds: result.rounds.filter(round => round.workId === work.id),
+    conclusions: result.conclusions.filter(conclusion => conclusion.workId === work.id),
+  };
+  console.log(asJson ? JSON.stringify(shown) : [formatActivity(result, work.id, {
+    title: work.title, archived: work.archived, from: result.works.find(entry => entry.id === work.id)?.from,
+  }), errors].filter(Boolean).join('\n'));
+
+  // 只读查询不发消息、不改变提醒状态；显示出结论的那些负责会话才推进汇总截止位置。
+  if (work.owner) {
+    state.summary = { ...(state.summary ?? {}), [work.owner]: result.cursor[work.owner] ?? {} };
+    state.summaryAt = { ...(state.summaryAt ?? {}), [work.owner]: result.summaryAt };
+  }
+  await saveActivityState(root, {
+    ...state, turns: result.state.turns, threads: snapshot.positions,
+    errors: snapshot.errors, observedAt: result.observedAt,
+  });
+  return 0;
+}
+
 async function handleCheck(vault, paths, root) {
   const targets = await checkPaths(root, paths, vault.model);
   const issues = [...(paths.length ? selectIssues(vault.index.issues, targets) : vault.index.issues), ...await annotationIssuesOutsideModel(root, targets, vault.model)];
@@ -206,12 +266,16 @@ export async function main(argv = process.argv.slice(2)) {
   if (config.webUrl) config.webUrl = normalizeWebUrl(config.webUrl);
   if (!cliRoot && !config?.root) throw new Error('未指定 InfoHub 根目录；请使用 --root <dir> 或运行 scripts/install.mjs。');
   const root = path.resolve(cliRoot || config.root);
+  // 必须比收窄 PATH 早：活动子进程以后要用这个绝对入口调用本机 codexhost。
+  const activityCli = locateActivityCli();
   await configureRuntime(config);
   if (command === 'sync') { await syncCommand(root, args.slice(1)); return 0; }
   if (command === 'brief' || command === 'check') {
     const { reason } = await ensureOnDemand(root, { refresh: command === 'brief' });
     if (reason) console.error(`InfoHub 同步：${reason}`);
+    await ensureActivity(root, { cli: activityCli });
   }
+  if (command === 'activity' && args[1] === 'run') { await runActivity(root, { cli: activityCli }); return 0; }
   const vault = await loadVault(root);
 
   switch (command) {
@@ -233,6 +297,8 @@ export async function main(argv = process.argv.slice(2)) {
       return 0;
     case 'check':
       return await handleCheck(vault, args.slice(1), root);
+    case 'activity':
+      return await handleActivity(root, args.slice(1), vault.index, activityCli);
     default:
       console.error(`未知命令: ${command}\n\n${USAGE}`);
       return 1;

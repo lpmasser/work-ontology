@@ -27,6 +27,8 @@ function validateModel(model) {
   }
 }
 
+const OWNER_THREAD = /^codex:\/\/threads\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 function objectInfo(object) {
   const { frontmatter, ...info } = object;
   return info;
@@ -66,6 +68,17 @@ function buildIndex(notes, model) {
     if (invalid.length) {
       issue(path, `属性缺失或值无效：${invalid.map(([field]) => field).join('、')}`);
       continue;
+    }
+    // 负责会话只有工作能填，且只收完整的会话链接；空值、列表和裸 ID 都由这里报。
+    if (Object.hasOwn(fm, 'owner_thread')) {
+      if (fm.ontology_type !== 'work_item') {
+        issue(path, `owner_thread 只能用于 work_item 对象，当前为 ${fm.ontology_type}`);
+        continue;
+      }
+      if (typeof fm.owner_thread !== 'string' || !OWNER_THREAD.test(fm.owner_thread)) {
+        issue(path, `owner_thread 必须是完整的会话链接 codex://threads/<UUID>：${JSON.stringify(fm.owner_thread ?? null)}`);
+        continue;
+      }
     }
     if (duplicates.has(id)) continue;
     objects.set(id, {

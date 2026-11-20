@@ -10,6 +10,14 @@ The existing PID lease arbitrates concurrent starts. A losing on-demand process 
 
 For an isolated short exit proof use `infohub sync run --on-demand --exit-after-seconds 2 --fetch-seconds 0.2`. The exit interval is a run-only option, never saved to the clone configuration. Ordinary `sync run` and Docker hosting run continuously. First-time dirty content still requires an explicitly authorized `sync run --include-existing`; installation itself does not authorize auto-committing that content.
 
+## Activity check
+
+A second on-demand process watches the sessions responsible for unfinished work items. `brief` and `check` start it through the same detached launch when a codexhost CLI is resolved before the runtime narrows `PATH` (`CODEXHOST_CLI_PATH`, else `codexhost` on the installed `PATH`). Without that CLI no activity process starts and `infohub activity` reports that the check is not enabled.
+
+It has its own PID lease and log under `.git/infohub-activity/` and its own `state.json`; Git synchronization progress and its `infohub-sync` state are never shared. It calls the external client interface once a minute with the calling Thread's identity and runtime endpoint removed, so the listing spans every workspace and background messages carry no Sender; and expands only the responsible sessions, the sessions whose rounds were attributed to a work, and sessions updated since the last observation. Rounds are attributed to the sender of their initiating input, only that input's standalone `不用回` line drops one, and a native watch or `交给：` line names the recipient before the dispatcher defaults.
+
+Exit conditions differ from the Git loop: the activity check exits as soon as no round is running and no delivery is still within its five-minute grace or open as an exception. Throwing a new batch of work afterwards needs one `infohub brief <project>` from the dispatcher; an already running check is reused. Reminder and summary positions live only in that state file, so a restart never repeats a reminder that was delivered.
+
 ## Status and diagnostics
 
 `infohub sync status` remains version 1 and a read-only filesystem projection. `installed` means the clone has valid sync settings, never an OS registration. `manager` describes the current/most recent process: `on-demand`, `foreground`, or `docker`; an unused local clone defaults to `on-demand`. Old service metadata is no longer a hosting authority. `running` checks the PID lease independently; `running: false` is normal for an idle on-demand clone. Pending errors and last observed unpublished local content remain visible in `brief`; a stopped Docker loop remains a concern. Timestamps and dirty paths describe the last completed observation, not a fresh Git inspection.
