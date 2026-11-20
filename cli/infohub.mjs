@@ -203,16 +203,17 @@ async function handleActivity(root, args, index, cli) {
   // 循环在跑且它刚算过一轮时直接用那份结果；否则自己观察。
   const background = await readActivityResult(root);
   const state = background.state;
-  let result = background.result, source = '后台结果', errors = formatErrors(state.errors);
+  let result = background.result, source = '后台结果', unreadable = state.errors ?? {};
   if (!result) {
     source = '本次观察';
     const snapshot = await observeActivity(cli, { index, state });
     result = judgeActivity(index, { threads: snapshot.threads, watches: snapshot.watches, now: new Date(), state });
-    errors = formatErrors(snapshot.errors);
+    unreadable = snapshot.errors;
   }
+  const errors = formatErrors(unreadable);
   const head = {
     version: 1, enabled: true, running: state.running, error: state.error ?? null,
-    observedAt: result.observedAt, source, unreadable: state.errors ?? {},
+    observedAt: result.observedAt, source, unreadable,
   };
   const section = work => ({
     work,
