@@ -721,3 +721,42 @@ test('activity without a work ID lists every work of the calling session, whiche
   assert.match(text.stdout, /面板化线 · /);
   assert.match(text.stdout, /另一条线 · /);
 });
+
+test('a fresh background result answers the query without calling codexhost; a stale one makes the query observe', async t => {
+  const f = await activityFixture(t);
+  await withFakeCodexhost(t, f.cli);
+  const dir = path.join(f.root, '.git/infohub-activity');
+  const callsFile = path.join(f.cli, 'calls.log');
+  const calls = async () => (await readFile(callsFile, 'utf8').catch(() => '')).split('\n').filter(Boolean).length;
+  // 活着的 pid：查询据此判断活动进程在跑。
+  await writeFile(path.join(dir, 'activity.pid'), String(process.pid));
+  const background = {
+    observedAt: new Date().toISOString(),
+    works: [{ id: 'work-a', title: '面板化线', owner: OWNER, path: 'docs/work.md', from: '2026-01-05T06:00:00.000Z' }],
+    exceptions: [{
+      key: `deliver:${EXECUTOR}#1`, kind: 'deliver', workId: 'work-a', recipient: NEXT, dispatcher: OWNER,
+      executor: { id: EXECUTOR, title: 'C2 线' }, turnNumber: 1, link: `codex://threads/${EXECUTOR}`,
+      since: T0, detail: '第 1 轮交付后五分钟未接', reminded: null
+    }],
+    rounds: [], conclusions: []
+  };
+  await writeFile(path.join(dir, 'result.json'), JSON.stringify(background));
+
+  const before = await calls();
+  const fresh = await runCli(['--root', f.root, 'activity', '--exceptions']);
+  assert.equal(fresh.code, 0, fresh.stderr);
+  assert.match(fresh.stdout, /（观察 .*，后台结果）/);
+  assert.match(fresh.stdout, /C2 线 #1 → codex:\/\/threads\/4444/);
+  assert.equal(await calls(), before, '新鲜的后台结果不调用 codexhost');
+  assert.equal(JSON.parse((await runCli(['--root', f.root, 'activity', '--exceptions', '--json'])).stdout).source, '后台结果');
+
+  // 过期：查询自己观察，并如实写下这是本次观察。
+  await writeFile(path.join(dir, 'result.json'), JSON.stringify({ ...background, observedAt: new Date(Date.now() - 5 * 60_000).toISOString() }));
+  const stale = await runCli(['--root', f.root, 'activity', '--exceptions']);
+  assert.equal(stale.code, 0, stale.stderr);
+  assert.match(stale.stdout, /（观察 .*，本次观察）/);
+  assert.ok(await calls() > before, '过期的后台结果改为自己观察');
+  const observed = JSON.parse((await runCli(['--root', f.root, 'activity', 'work-a', '--json'])).stdout);
+  assert.equal(observed.source, '本次观察');
+  assert.deepEqual(observed.conclusions.map(conclusion => conclusion.text), ['已在本地提交 486a69581。']);
+});

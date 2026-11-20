@@ -267,14 +267,14 @@ export function situationLine(exception) {
   return `${who} → ${exception.recipient}，${exception.detail}${exception.reminded ? `；已提醒 ${exception.recipient}` : ''}`;
 }
 
-function windowText(from, to) {
-  return `${from ? from.slice(11, 16) : '未观察'}–${to.slice(11, 16)}（观察 ${to}）`;
+function windowText(from, to, source) {
+  return `${from ? from.slice(11, 16) : '未观察'}–${to.slice(11, 16)}（观察 ${to}，${source}）`;
 }
 
 const excerpt = (text, size = 160) => text.length > size ? `${text.slice(0, size)}…` : text;
 
-export function formatActivity(result, work, { title, archived, from }) {
-  const lines = [`${title} · ${windowText(from, result.observedAt)}`];
+export function formatActivity(result, work, { title, archived, from, source = '本次观察' }) {
+  const lines = [`${title} · ${windowText(from, result.observedAt, source)}`];
   if (archived) lines.push('已归档');
   lines.push('待处理');
   const open = result.exceptions.filter(exception => exception.workId === work);
@@ -291,8 +291,8 @@ export function formatActivity(result, work, { title, archived, from }) {
   return lines.join('\n');
 }
 
-export function formatExceptions(result) {
-  const window = windowText(result.works[0]?.from, result.observedAt);
+export function formatExceptions(result, source = '本次观察') {
+  const window = windowText(result.works[0]?.from, result.observedAt, source);
   if (!result.exceptions.length) return `未结例外 · ${window}\n无`;
   return [`未结例外 · ${window}`, ...result.exceptions.map(exception => `  ${situationLine(exception)}`)].join('\n');
 }

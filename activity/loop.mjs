@@ -14,6 +14,16 @@ export async function activityHome(root) {
   return path.join(await realpath(root), '.git/infohub-activity');
 }
 
+// 后台每轮把判断结果写在这里：循环在跑且结果在一个检查间隔的两倍以内时，查询直接读它，
+// 不必再读一遍所有会话。
+export async function readActivityResult(root) {
+  const state = await readActivityState(root);
+  if (!state.running) return { state, result: null };
+  const result = await json(path.join(await activityHome(root), 'result.json'), null);
+  const fresh = result && Date.now() - Date.parse(result.observedAt) <= ACTIVITY_INTERVAL_MS * 2;
+  return { state, result: fresh ? result : null };
+}
+
 export async function readActivityState(root) {
   const dir = await activityHome(root);
   const state = await json(path.join(dir, 'state.json'), {});
@@ -131,7 +141,7 @@ export async function runActivity(root, { cli = process.env.INFOHUB_ACTIVITY_CLI
   if (!cli) throw new Error('没有 codexhost CLI，活动检查未启用');
   const dir = await activityHome(root);
   await mkdir(dir, { recursive: true });
-  const stateFile = path.join(dir, 'state.json');
+  const stateFile = path.join(dir, 'state.json'), resultFile = path.join(dir, 'result.json');
   const release = await lease(path.join(dir, 'activity.pid'), { ifBusy: true });
   if (!release) return;
   // 本进程内存里保留上一份会话快照：没变的会话不重复读。
@@ -147,6 +157,10 @@ export async function runActivity(root, { cli = process.env.INFOHUB_ACTIVITY_CLI
         throw error;
       }
       await save(stateFile, result.state);
+      await save(resultFile, {
+        observedAt: result.observedAt, works: result.works,
+        exceptions: result.exceptions, rounds: result.rounds, conclusions: result.conclusions,
+      });
       if (result.settled) {
         console.log(`${iso()} 各轮已停且交件结清，退出活动检查`);
         return;

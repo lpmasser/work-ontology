@@ -9,7 +9,7 @@ import { isUnfinishedWork, needsUserDecision } from '../core/engine.js';
 import { currentOwners, describeWork, threadLink, judgeActivity, formatActivity, formatExceptions, formatErrors } from '../core/activity.mjs';
 import { findActivityCli as locateActivityCli } from '../activity/codexhost.mjs';
 import { observeActivity } from '../activity/observe.mjs';
-import { ensureActivity, runActivity, readActivityState } from '../activity/loop.mjs';
+import { ensureActivity, runActivity, readActivityResult } from '../activity/loop.mjs';
 import { resolveProject, filterObjects, queryFind, queryGet, queryAround } from '../core/query.mjs';
 import { checkPaths, selectIssues, annotationIssuesOutsideModel } from '../core/validation.mjs';
 import { annotationSummary } from '../core/annotations.mjs';
@@ -200,14 +200,20 @@ async function handleActivity(root, args, index, cli) {
   }
 
   // 只读查询：读最近一次观察位置，不写状态、不发消息、不推进汇总位置（那是后台循环的事）。
-  const state = await readActivityState(root);
-  const snapshot = await observeActivity(cli, { index, state });
-  const result = judgeActivity(index, { threads: snapshot.threads, watches: snapshot.watches, now: new Date(), state });
+  // 循环在跑且它刚算过一轮时直接用那份结果；否则自己观察。
+  const background = await readActivityResult(root);
+  const state = background.state;
+  let result = background.result, source = '后台结果', errors = formatErrors(state.errors);
+  if (!result) {
+    source = '本次观察';
+    const snapshot = await observeActivity(cli, { index, state });
+    result = judgeActivity(index, { threads: snapshot.threads, watches: snapshot.watches, now: new Date(), state });
+    errors = formatErrors(snapshot.errors);
+  }
   const head = {
     version: 1, enabled: true, running: state.running, error: state.error ?? null,
-    observedAt: result.observedAt, unreadable: snapshot.errors,
+    observedAt: result.observedAt, source, unreadable: state.errors ?? {},
   };
-  const errors = formatErrors(snapshot.errors);
   const section = work => ({
     work,
     exceptions: result.exceptions.filter(exception => exception.workId === work.id),
@@ -215,11 +221,12 @@ async function handleActivity(root, args, index, cli) {
     conclusions: result.conclusions.filter(conclusion => conclusion.workId === work.id),
   });
   const block = work => formatActivity(result, work.id, {
-    title: work.title, archived: work.archived, from: result.works.find(entry => entry.id === work.id)?.from,
+    title: work.title, archived: work.archived, source,
+    from: result.works.find(entry => entry.id === work.id)?.from,
   });
 
   if (flags.includes('--exceptions')) {
-    console.log(asJson ? JSON.stringify({ ...head, exceptions: result.exceptions }) : [formatExceptions(result), errors].filter(Boolean).join('\n'));
+    console.log(asJson ? JSON.stringify({ ...head, exceptions: result.exceptions }) : [formatExceptions(result, source), errors].filter(Boolean).join('\n'));
     return 0;
   }
 

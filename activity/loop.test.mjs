@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { runActivity, ensureActivity, readActivityState, activityHome } from './loop.mjs';
+import { runActivity, ensureActivity, readActivityState, readActivityResult, activityHome } from './loop.mjs';
 import { findActivityCli } from './codexhost.mjs';
 
 const C1 = 'codex://threads/11111111-1111-1111-1111-111111111111';
@@ -105,6 +105,13 @@ test('the loop reminds the recipient once, escalates once, and exits after the d
   await finishRound(f, new Date(Date.parse(T0) + 60_000).toISOString());
   const first = await until(async () => (await sent(f.cli))[0], '五分钟后没有提醒接手人');
   assert.equal(first.threadId, D.slice('codex://threads/'.length));
+  // 循环把判断结果写在 result.json，查询在它新鲜时直接读这份。
+  const shared = await until(async () => {
+    const { result } = await readActivityResult(f.root);
+    return result?.exceptions.length ? result : null;
+  }, '没有写出后台结果');
+  assert.equal(shared.exceptions[0].kind, 'deliver');
+  assert.deepEqual(shared.conclusions.map(conclusion => conclusion.text), ['已在本地提交 486a69581。']);
   assert.match(first.message, /面板化线 `work-a`.*第 1 轮.*已结束五分钟/);
   assert.match(first.message, /infohub activity work-a/);
 
@@ -140,6 +147,7 @@ test('the loop reminds the recipient once, escalates once, and exits after the d
   const state = await readActivityState(f.root);
   assert.equal(state.running, false);
   assert.deepEqual(state.reminded, [], '接住后提醒记录一并撤掉');
+  assert.equal((await readActivityResult(f.root)).result, null, '循环不在跑时查询不读后台结果');
   assert.equal(await stat(path.join(await activityHome(f.root), 'state.json')).then(() => true), true);
 });
 
