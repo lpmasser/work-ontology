@@ -82,10 +82,21 @@ test('a delivery is only raised after five minutes, and a picked-up delivery is 
   assert.equal(late.exceptions[0].kind, 'deliver');
   assert.equal(late.exceptions[0].recipient, C1);
 
-  // C1 收到指向这次交付的消息，就是接件事实；已接就不再重复催。
-  const picked = judge([owner], [thread([delivered]), thread([turn(1, { sender: `codex://threads/${EXECUTOR}`, body: 'C2 的交付到了', status: 'running' })], { id: threadId(C1), title: 'C1', status: 'running' })],
+  // 接手人那一轮提到执行者并已结束，就是接件事实；已接就不再重复催。
+  const picked = judge([owner], [thread([delivered]), thread([turn(1, { sender: `codex://threads/${EXECUTOR}`, body: 'C2 的交付到了', reply: '开始组批' })], { id: threadId(C1), title: 'C1', status: 'completed' })],
     { now: new Date(Date.parse('2026-11-21T07:00:00.000Z')), state: late.state });
   assert.deepEqual(picked.exceptions.filter(exception => exception.kind === 'deliver'), []);
+  assert.equal(picked.settled, true, '接住后退出条件成立');
+
+  // 只是被我们的提醒叫醒、还没结束的不算接住；提醒那一轮结束即撤项。
+  const remindedThread = thread([turn(1, { sender: `codex://threads/${EXECUTOR}`, body: '面板化线 `work-a`，C2 线〔codex://threads/5555〕第 1 轮已结束五分钟', status: 'running' })],
+    { id: threadId(C1), title: 'C1', status: 'running' });
+  const awake = judge([owner], [thread([delivered]), remindedThread], { now: new Date(Date.parse('2026-11-21T07:00:00.000Z')), state: late.state });
+  assert.equal(awake.exceptions.filter(exception => exception.kind === 'deliver').length, 1);
+  const answered = judge([owner], [thread([delivered]), thread([{ ...remindedThread.turns[0], status: 'completed', messages: [...remindedThread.turns[0].messages, { role: 'agent', phase: 'final', text: '已接手' }] }], { id: threadId(C1), title: 'C1', status: 'completed' })],
+    { now: new Date(Date.parse('2026-11-21T07:05:00.000Z')), state: awake.state });
+  assert.deepEqual(answered.exceptions.filter(exception => exception.kind === 'deliver'), []);
+  assert.equal(answered.settled, true);
 });
 
 test('an unclaimed delivery escalates to the dispatcher once, and names the blocking reason instead', () => {
@@ -109,14 +120,21 @@ test('an unclaimed delivery escalates to the dispatcher once, and names the bloc
   const sameEscalate = samePerson.exceptions.find(exception => exception.kind === 'escalate');
   assert.ok(sameEscalate);
   assert.equal(sameEscalate.blocking, '派活人就是接手人，未指定其他接手人');
-  // 换任后这一轮归新的负责会话；旧人零条，清单写明阻塞。
-  const changed = judge([work('work-a', C2), work('work-b', C1)], [thread([delivered]), thread([], d)], {
+  // 派活人已经不负责任何进行中的工作时，这一轮照常判断，只在升级那一步写阻塞，不叫醒旧人。
+  const moved = judge([work('work-a', C2)], [thread([delivered]), thread([], d)], {
     now, watches: [deliversTo], state: { ...state, turns: escalated.state.turns }
   });
-  const moved = changed.exceptions.find(exception => exception.kind === 'changed');
-  assert.equal(moved.workId, 'work-a');
-  assert.equal(moved.recipient, null);
-  assert.match(moved.blocking, /这一轮的负责会话已换任/);
+  const stranded = moved.exceptions.find(exception => exception.kind === 'escalate');
+  assert.equal(stranded.workId, 'work-a');
+  assert.equal(stranded.recipient, C1);
+  assert.match(stranded.blocking, /派活人已换任（现为 codex:\/\/threads\/2222/);
+  assert.equal(moved.settled, true, '阻塞项不拖住循环');
+
+  // 负责多项工作时沿用记录里原来的那项。
+  const twoWorks = judge([work('work-a', C1), work('work-b', C1)], [thread([delivered])], {
+    now, state: { turns: { [`${EXECUTOR}#1`]: { workId: 'work-b', dispatcher: C1, floor: 0, terminalAt: '2026-11-21T06:40:00.000Z', pickedUp: false } } }
+  });
+  assert.deepEqual(twoWorks.conclusions.map(conclusion => conclusion.workId), ['work-b']);
   const busyDispatcher = thread([], {
     id: threadId(C1), title: 'C1', status: 'running',
     pending: [{ interactionId: 'int-2', turnId: 'x', request: { questions: [{ prompt: '选哪个？' }] } }]
@@ -176,4 +194,39 @@ test('only unfinished work outside archive with an owner thread can dispatch', (
   objects[2].path = '工作/archive/old.md';
   assert.deepEqual(currentOwners(index(...objects)).map(entry => entry.id), ['live']);
   assert.equal(currentOwners(index(work('none', undefined, { owner_thread: undefined }))).length, 0);
+});
+
+test('a 交给 target without a current owner becomes a blocking item instead of an error', () => {
+  const owner = work('work-a', C1);
+  const gone = work('work-old', C2, { progress: '已交付' });
+  const archived = work('work-archived', C2);
+  archived.path = '工作/archive/work-archived.md';
+  const orphan = { id: 'work-orphan', type: 'work_item', title: '无负责会话', path: '工作/orphan.md', frontmatter: { progress: '实施中' } };
+  const now = new Date('2026-11-21T06:50:00.000Z');
+  const turns = [turn(1, { sender: C1, body: '交给：work-old' }), turn(2, { sender: C1, body: '交给：work-archived' }), turn(3, { sender: C1, body: '交给：work-orphan' })];
+  const result = judge([owner, gone, archived, orphan], [thread(turns)], { now });
+  assert.deepEqual(result.exceptions.map(exception => [exception.kind, exception.recipient, exception.blocking]), [
+    ['blocked', C2, '交给 的 work-old 已归档或已终结，按角色不唤醒原负责会话'],
+    ['blocked', C2, '交给 的 work-archived 已归档或已终结，按角色不唤醒原负责会话'],
+    ['blocked', null, '交给 的 work-orphan 没有负责会话']
+  ]);
+  assert.equal(result.settled, true, '取不到现任的项不拖住循环');
+  assert.equal(result.state.turns[`${EXECUTOR}#3`].blocked, true);
+});
+
+test('settled rounds drop out of the stored records and reminders only keep open exceptions', () => {
+  const owner = work('work-a', C1);
+  const now = new Date('2026-11-21T06:50:00.000Z');
+  const threads = [
+    thread([turn(1, { sender: C1, reply: '交件一' })]),
+    thread([turn(1, { sender: `codex://threads/${EXECUTOR}`, body: '接件', reply: '组批中' })], { id: threadId(C1), title: 'C1' })
+  ];
+  const state = {
+    reminded: [{ key: `deliver:${EXECUTOR}#1`, recipient: C1, at: '2026-11-21T06:41:00.000Z' }, { key: 'failure:old#9', recipient: C1, at: '2026-11-21T06:00:00.000Z' }],
+    turns: { [`${EXECUTOR}#1`]: { workId: 'work-a', dispatcher: C1, floor: 0, terminalAt: '2026-11-21T06:40:00.000Z', pickedUp: false } }
+  };
+  const settled = judge([owner], threads, { now, state });
+  assert.equal(settled.settled, true);
+  assert.deepEqual(settled.state.turns, {}, '已接住的轮不再留在记录里');
+  assert.deepEqual(settled.state.reminded, [], '已撤项的提醒不再保留');
 });

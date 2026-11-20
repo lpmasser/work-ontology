@@ -29,13 +29,15 @@ function call(cli, args) {
 
 const json = (cli, args) => call(cli, [...args, '--format', 'json']);
 
-export async function listThreads(cli) {
+// 按 updated-desc 翻页；翻到整页都不比上次观察新的那一页就停，不把整机历史列一遍。
+export async function listThreads(cli, since) {
   const threads = [];
   let cursor = null;
   do {
     const page = await json(cli, ['thread', 'list', '--sort', 'updated-desc', '--limit', '100', ...(cursor ? ['--cursor', cursor] : [])]);
     threads.push(...page.threads);
-    cursor = page.nextCursor;
+    const oldest = page.threads.at(-1)?.updatedAt;
+    cursor = since && oldest && oldest < since ? null : page.nextCursor;
   } while (cursor);
   return threads;
 }

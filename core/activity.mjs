@@ -1,6 +1,5 @@
-import { isUnfinishedWork } from './engine.js';
+import { isUnfinishedWork, OWNER_THREAD_PATTERN } from './engine.js';
 
-export const OWNER_THREAD_PATTERN = /^codex:\/\/threads\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const DELIVERY_GRACE_MS = 5 * 60_000;
 export const SUMMARY_INTERVAL_MS = 15 * 60_000;
 const STOPPED = ['completed', 'failed', 'interrupted'];
@@ -69,13 +68,22 @@ function terminalAt(thread, isLatest, now) {
   return isLatest && thread.status !== 'running' && thread.updatedAt ? thread.updatedAt : now.toISOString();
 }
 
+// 接手人只要在交件后有过一轮提到执行者会话、并且那一轮已经结束，就算接住了：
+// 执行者直接发来的任务、watch 通知、我们的提醒、别人转来的消息都算。
 function pickedUpBy(thread, executorId, floor) {
   if (!thread) return false;
-  return thread.turns.some(turn => turn.turnNumber > floor && (() => {
-    const initiator = readInitiator(turn);
-    if (initiator.kind === 'task') return initiator.sender === threadLink(executorId);
-    return initiator.kind === 'watch' && (turn.messages[0]?.text ?? '').includes(`thread://${executorId}`);
-  })());
+  const mentioned = [threadLink(executorId), `thread://${executorId}`];
+  return thread.turns.some(turn => turn.turnNumber > floor
+    && STOPPED.includes(turn.status)
+    && mentioned.some(link => (turn.messages.find(message => message.role === 'user')?.text ?? '').includes(link)));
+}
+
+function workOf(index, id) {
+  const object = index.objects.get(id);
+  return object ? {
+    id, title: object.title, owner: object.frontmatter.owner_thread ?? null,
+    archived: isArchived(object.path), unfinished: isUnfinishedWork(object)
+  } : null;
 }
 
 /**
@@ -85,7 +93,11 @@ function pickedUpBy(thread, executorId, floor) {
 export function judgeActivity(index, { threads, watches = [], now = new Date(), state = {} }) {
   const nowMs = now.getTime();
   const works = currentOwners(index);
-  const workByOwner = new Map(works.map(work => [work.owner, work]));
+  const worksByOwner = new Map();
+  for (const work of works) {
+    if (!worksByOwner.has(work.owner)) worksByOwner.set(work.owner, []);
+    worksByOwner.get(work.owner).push(work);
+  }
   const threadById = new Map(threads.map(thread => [thread.threadId, thread]));
   const watchByTurn = new Map(watches.filter(watch => watch.turnId).map(watch => [watch.turnId, watch]));
   const observed = structuredClone(state.turns ?? {});
@@ -93,6 +105,7 @@ export function judgeActivity(index, { threads, watches = [], now = new Date(), 
   const reminded = [...(state.reminded ?? [])];
   const cursor = structuredClone(state.summary ?? {});
   const exceptions = [], rounds = [], conclusions = [];
+  const held = new Set();
 
   for (const thread of threads) {
     const ordered = [...thread.turns].sort((a, b) => a.turnNumber - b.turnNumber);
@@ -100,50 +113,66 @@ export function judgeActivity(index, { threads, watches = [], now = new Date(), 
     for (const turn of ordered) {
       const initiator = readInitiator(turn);
       if (initiator.kind !== 'task' || initiator.noReply) continue;
-      const work = workByOwner.get(initiator.sender);
-      if (!work) continue;
       const key = `${thread.threadId}#${turn.turnNumber}`;
-      const record = observed[key] ??= { workId: work.id, dispatcher: initiator.sender, floor: null, terminalAt: null, pickedUp: false };
-      const base = { workId: work.id, executor: { id: thread.threadId, title: thread.title }, turnNumber: turn.turnNumber, link: threadLink(thread.threadId), dispatcher: initiator.sender };
-      // 这一轮派出去之后负责会话换了工作：不唤醒旧人，清单写明阻塞。
-      if (record.workId !== work.id) {
-        exceptions.push({ key: `changed:${key}`, kind: 'changed', ...base, workId: record.workId, recipient: null, since: now.toISOString(), blocking: `这一轮的负责会话已换任（现归 ${work.id}），不再唤醒原负责会话` });
+      const record = observed[key];
+      // 一个会话可能先后或同时负责多项工作：仍在负责的那几项里优先沿用原来那项。
+      const owned = worksByOwner.get(initiator.sender) ?? [];
+      const target = owned.find(work => work.id === record?.workId) ?? owned[0] ?? (record ? workOf(index, record.workId) : null);
+      if (!target) {
+        delete observed[key];
         continue;
       }
+      const entry = record ?? (observed[key] = { workId: target.id, dispatcher: initiator.sender, floor: null, terminalAt: null, pickedUp: false });
+      held.add(key);
+      const base = {
+        workId: target.id, executor: { id: thread.threadId, title: thread.title },
+        turnNumber: turn.turnNumber, link: threadLink(thread.threadId), dispatcher: initiator.sender
+      };
       const { recipient, blocking } = recipientOf(index, initiator, watchByTurn.get(turn.turnId));
-      attributed.push({ turn, work, recipient, key, record, blocking });
+      attributed.push({ turn, work: target, recipient, key, record: entry, blocking });
+
+      if (blocking) {
+        entry.blocked = true;
+        exceptions.push({
+          key: `blocked:${key}`, kind: 'blocked', ...base, recipient, blocking, since: now.toISOString(),
+          detail: `第 ${turn.turnNumber} 轮按「交给」取不到现任`
+        });
+        continue;
+      }
+      entry.blocked = false;
 
       if (!STOPPED.includes(turn.status)) {
         rounds.push({ ...base, status: turn.status, progress: turn.messages.filter(message => message.role === 'agent').at(-1)?.text?.trim() ?? null });
         continue;
       }
-      const isLatest = turn === ordered.at(-1);
-      if (record.terminalAt === null) {
-        record.floor = maxTurn(threadById.get(threadId(recipient)));
-        record.terminalAt = terminalAt(thread, isLatest, now);
+      if (entry.terminalAt === null) {
+        entry.floor = maxTurn(threadById.get(threadId(recipient)));
+        entry.terminalAt = terminalAt(thread, turn === ordered.at(-1), now);
       }
       const conclusion = conclusionOf(turn);
-      cursor[work.owner] ??= {};
-      if (conclusion) {
-        conclusions.push({ ...base, text: conclusion, isNew: turn.turnNumber > (cursor[work.owner][thread.threadId] ?? 0) });
-        cursor[work.owner][thread.threadId] = Math.max(cursor[work.owner][thread.threadId] ?? 0, turn.turnNumber);
+      if (target.owner) {
+        cursor[target.owner] ??= {};
+        if (conclusion) {
+          conclusions.push({ ...base, text: conclusion, isNew: turn.turnNumber > (cursor[target.owner][thread.threadId] ?? 0) });
+          cursor[target.owner][thread.threadId] = Math.max(cursor[target.owner][thread.threadId] ?? 0, turn.turnNumber);
+        }
       }
       if (turn.status !== 'completed') {
         if (!ordered.some(later => later.turnNumber > turn.turnNumber)) {
           exceptions.push({
-            key: `failure:${key}`, kind: 'failure', ...base, recipient, blocking, since: record.terminalAt,
+            key: `failure:${key}`, kind: 'failure', ...base, recipient, since: entry.terminalAt,
             detail: `第 ${turn.turnNumber} 轮 ${turn.status}${conclusion ? `：${conclusion}` : ''}`
           });
         }
         continue;
       }
-      if (!record.pickedUp) record.pickedUp = pickedUpBy(threadById.get(threadId(recipient)), thread.threadId, record.floor);
-      if (record.pickedUp) continue;
-      const delivery = { workId: work.id, executor: base.executor, turnNumber: turn.turnNumber, link: base.link, recipient, blocking, dispatcher: initiator.sender, since: record.terminalAt };
-      if (nowMs - Date.parse(record.terminalAt) >= DELIVERY_GRACE_MS) {
+      if (!entry.pickedUp) entry.pickedUp = pickedUpBy(threadById.get(threadId(recipient)), thread.threadId, entry.floor);
+      if (entry.pickedUp) continue;
+      const delivery = { ...base, recipient, since: entry.terminalAt };
+      if (nowMs - Date.parse(entry.terminalAt) >= DELIVERY_GRACE_MS) {
         exceptions.push({ key: `deliver:${key}`, kind: 'deliver', ...delivery, detail: `第 ${turn.turnNumber} 轮交付后五分钟未接` });
       }
-      const sent = reminded.find(entry => entry.key === `deliver:${key}` && entry.recipient === recipient);
+      const sent = reminded.find(item => item.key === `deliver:${key}` && item.recipient === recipient);
       if (sent && nowMs - Date.parse(sent.at) >= DELIVERY_GRACE_MS) {
         // 接手人先动，派活人只接升级：升级只找派这一轮活的会话一次。
         exceptions.push({
@@ -154,7 +183,7 @@ export function judgeActivity(index, { threads, watches = [], now = new Date(), 
     }
 
     for (const pending of thread.pendingQuestions) {
-      const current = attributed.find(entry => entry.turn.turnId === pending.turnId) ?? attributed.at(-1);
+      const current = attributed.find(item => item.turn.turnId === pending.turnId) ?? attributed.at(-1);
       if (!current) continue;
       exceptions.push({
         key: `question:${current.key}:${pending.interactionId}`, kind: 'question', workId: current.work.id,
@@ -167,7 +196,7 @@ export function judgeActivity(index, { threads, watches = [], now = new Date(), 
 
     const visible = ordered.slice(-STREAK_WINDOW);
     const interrupted = visible.filter(turn => turn.status === 'interrupted');
-    const latest = attributed.filter(entry => visible.includes(entry.turn)).at(-1);
+    const latest = attributed.filter(item => visible.includes(item.turn)).at(-1);
     if (interrupted.length < STREAK_INTERRUPTED) delete streaks[thread.threadId];
     else if (latest && streaks[thread.threadId] !== interrupted[0].turnNumber) {
       streaks[thread.threadId] = interrupted[0].turnNumber;
@@ -180,23 +209,38 @@ export function judgeActivity(index, { threads, watches = [], now = new Date(), 
     }
   }
 
-  // 接手人本人、停在提问框、已换任或不在范围内时，清单直接写清阻塞。
+  // 有阻塞的项只进清单写明阻塞：不走接件判断，也不拖住循环。
+  // 升级也接不了时，同一件事不再重复挂在「交付未接」上。
+  const givenUp = new Set();
   for (const exception of exceptions) {
-    exception.reminded = reminded.find(entry => entry.key === exception.key && entry.recipient === exception.recipient)?.at ?? null;
+    exception.reminded = reminded.find(item => item.key === exception.key && item.recipient === exception.recipient)?.at ?? null;
     if (exception.kind !== 'escalate') continue;
     const dispatcher = threadById.get(threadId(exception.dispatcher));
+    const target = workOf(index, exception.workId);
     if (exception.primary === exception.dispatcher) exception.blocking = '派活人就是接手人，未指定其他接手人';
     else if (dispatcher?.pendingQuestions.length) exception.blocking = '派活人停在提问框，不能插话';
+    else if (!target || target.archived) exception.blocking = '派活的工作已归档或不在库里，不唤醒原负责会话';
+    else if (target.owner !== exception.dispatcher) exception.blocking = `派活人已换任（现为 ${target.owner ?? '无'}）`;
+    if (exception.blocking) givenUp.add(exception.key.slice('escalate:'.length));
   }
+  for (const key of givenUp) if (observed[key]) observed[key].blocked = true;
+  const open = exceptions.filter(exception => !(exception.kind === 'deliver' && givenUp.has(exception.key.slice('deliver:'.length))));
 
-  const unfinished = Object.values(observed).filter(record => record.terminalAt && !record.pickedUp);
+  const openKeys = new Set(open.map(exception => exception.key));
+  for (const [key, record] of Object.entries(observed)) {
+    const open = held.has(key) && (openKeys.has(key) || [...openKeys].some(entry => entry.endsWith(`:${key}`)) || (record.terminalAt && !record.pickedUp && !record.blocked));
+    if (!open) delete observed[key];
+  }
+  const kept = reminded.filter(item => openKeys.has(item.key));
+  const waiting = Object.values(observed).some(record => record.terminalAt && !record.pickedUp && !record.blocked);
+
   return {
     observedAt: now.toISOString(),
     works: works.map(work => ({ ...work, from: state.summaryAt?.[work.owner] ?? state.observedAt ?? null })),
-    rounds, conclusions, exceptions,
-    settled: !rounds.length && !exceptions.length && !unfinished.length,
+    rounds, conclusions, exceptions: open,
+    settled: !rounds.length && !waiting && !open.some(exception => !exception.blocking),
     cursor, summaryAt: now.toISOString(),
-    state: { observedAt: now.toISOString(), turns: observed, streaks, reminded, summary: state.summary ?? {}, summaryAt: state.summaryAt ?? {} }
+    state: { observedAt: now.toISOString(), turns: observed, streaks, reminded: kept, summary: state.summary ?? {}, summaryAt: state.summaryAt ?? {} }
   };
 }
 

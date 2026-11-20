@@ -27,7 +27,8 @@ function validateModel(model) {
   }
 }
 
-const OWNER_THREAD = /^codex:\/\/threads\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// 负责会话只收完整链接；活动判断共用这一份。
+export const OWNER_THREAD_PATTERN = /^codex:\/\/threads\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function objectInfo(object) {
   const { frontmatter, ...info } = object;
@@ -75,7 +76,7 @@ function buildIndex(notes, model) {
         issue(path, `owner_thread 只能用于 work_item 对象，当前为 ${fm.ontology_type}`);
         continue;
       }
-      if (typeof fm.owner_thread !== 'string' || !OWNER_THREAD.test(fm.owner_thread)) {
+      if (typeof fm.owner_thread !== 'string' || !OWNER_THREAD_PATTERN.test(fm.owner_thread)) {
         issue(path, `owner_thread 必须是完整的会话链接 codex://threads/<UUID>：${JSON.stringify(fm.owner_thread ?? null)}`);
         continue;
       }

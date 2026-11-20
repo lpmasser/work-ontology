@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, mkdir, writeFile, readFile, copyFile, symlink } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, readFile, copyFile, symlink, stat } from 'node:fs/promises';
 import { findExecutable } from '../core/runtime.mjs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -600,10 +600,12 @@ async function activityFixture(t) {
   const turn = { turnId: 'turn-1', turnNumber: 1, status: 'completed', messages: [{ role: 'user', text: `派给你\n\nSender: ${OWNER}` }, { role: 'agent', phase: 'final', text: '已在本地提交 486a69581。' }] };
   await write('threads.json', { threads: [
     { threadId: EXECUTOR, title: 'C2 线', status: 'completed', updatedAt: T0 },
-    { threadId: '44444444-4444-4444-4444-444444444444', title: 'D', status: 'completed', updatedAt: T0 }
+    { threadId: '44444444-4444-4444-4444-444444444444', title: 'D', status: 'completed', updatedAt: T0 },
+    { threadId: OWNER.slice('codex://threads/'.length), title: '主控', status: 'completed', updatedAt: T0 }
   ], nextCursor: null });
   await write(`read/${EXECUTOR}.json`, { threadId: EXECUTOR, title: 'C2 线', status: 'completed', from: 1, to: 1, totalTurns: 1, turns: [turn], pendingQuestions: [] });
   await write('read/44444444-4444-4444-4444-444444444444.json', { threadId: '44444444-4444-4444-4444-444444444444', title: 'D', status: 'completed', from: null, to: null, totalTurns: 0, turns: [], pendingQuestions: [] });
+  await write(`read/${OWNER.slice('codex://threads/'.length)}.json`, { threadId: OWNER.slice('codex://threads/'.length), title: '主控', status: 'completed', from: null, to: null, totalTurns: 0, turns: [], pendingQuestions: [] });
   await write('watches.json', { watches: [{ threadId: EXECUTOR, notifyThreadId: '44444444-4444-4444-4444-444444444444', state: 'watching', turnId: 'turn-1', outcome: 'completed' }] });
   return { root, cli, work };
 }
@@ -639,7 +641,7 @@ test('activity shows the current owner, the open exception and new conclusions w
   await withFakeCodexhost(t, f.cli);
 
   const text = await runCli(['--root', f.root, 'activity', 'work-a']);
-  assert.equal(text.code, 0);
+  assert.equal(text.code, 0, text.stderr);
   assert.match(text.stdout, /面板化线 · (未观察|\d\d:\d\d)–\d\d:\d\d（观察 \d{4}-\d\d-\d\dT\d\d:\d\d[^）]*）/);
   assert.match(text.stdout, new RegExp(`C2 线 #1 → ${NEXT.replaceAll('/', '\\/')}，第 1 轮交付后五分钟未接`));
   assert.match(text.stdout, /C2 线 #1〔执行者报告〕“已在本地提交 486a69581。”〔codex:\/\/threads\/5555/);
@@ -647,7 +649,10 @@ test('activity shows the current owner, the open exception and new conclusions w
   const first = JSON.parse((await runCli(['--root', f.root, 'activity', 'work-a', '--json'])).stdout);
   assert.equal(first.enabled, true);
   assert.equal(first.work.owner, OWNER);
-  assert.deepEqual(first.conclusions.map(conclusion => conclusion.isNew), [false], '读过一次的结论不再算新增');
+  assert.deepEqual(first.conclusions.map(conclusion => conclusion.isNew), [true], '汇总位置只由后台循环推进');
+  // 查询不写状态：两次读取互不影响，也没有留下任何状态文件。
+  const second = JSON.parse((await runCli(['--root', f.root, 'activity', 'work-a', '--json'])).stdout);
+  assert.deepEqual(second.conclusions.map(conclusion => conclusion.isNew), [true]);
 
   const exceptions = JSON.parse((await runCli(['--root', f.root, 'activity', '--exceptions', '--json'])).stdout);
   assert.deepEqual(exceptions.exceptions.map(exception => [exception.kind, exception.recipient]), [['deliver', NEXT]]);
@@ -657,6 +662,7 @@ test('activity shows the current owner, the open exception and new conclusions w
   assert.match(missed.stderr, /找不到工作对象/);
 
   await assert.rejects(readFile(path.join(f.cli, 'sent.jsonl'), 'utf8'), { code: 'ENOENT' }, '只读查询不发消息');
+  await assert.rejects(stat(path.join(f.root, '.git/infohub-activity', 'state.json')), { code: 'ENOENT' }, '只读查询不写状态');
 });
 
 test('activity reports itself as not enabled when this machine has no codexhost CLI', async t => {
@@ -681,4 +687,24 @@ test('activity reports itself as not enabled when this machine has no codexhost 
   assert.deepEqual(offJson, { version: 1, enabled: false });
   const checked = await runCli(['--root', f.root, 'check', path.join(f.root, 'docs/work.md')]);
   assert.equal(checked.code, 0, '没有 codexhost 时原有校验照常可用');
+});
+
+test('activity without a work ID lists every work of the calling session, whichever codexhost variable names it', async t => {
+  const f = await activityFixture(t);
+  await withFakeCodexhost(t, f.cli);
+  await writeFile(path.join(f.root, 'docs/work2.md'),
+    `---\nontology_id: "work-b"\nontology_type: "work_item"\ntitle: "另一条线"\nprogress: "实施中"\nowner_thread: "${OWNER}"\n---\n`);
+  const before = { host: process.env.CODEXHOST_THREAD_ID, codex: process.env.CODEX_THREAD_ID };
+  delete process.env.CODEXHOST_THREAD_ID;
+  process.env.CODEX_THREAD_ID = OWNER.slice('codex://threads/'.length);
+  t.after(() => {
+    if (before.host !== undefined) process.env.CODEXHOST_THREAD_ID = before.host;
+    if (before.codex === undefined) delete process.env.CODEX_THREAD_ID; else process.env.CODEX_THREAD_ID = before.codex;
+  });
+  const shown = JSON.parse((await runCli(['--root', f.root, 'activity', '--json'])).stdout);
+  assert.deepEqual(shown.works.map(entry => entry.work.id).sort(), ['work-a', 'work-b']);
+  const text = await runCli(['--root', f.root, 'activity']);
+  assert.equal(text.code, 0);
+  assert.match(text.stdout, /面板化线 · /);
+  assert.match(text.stdout, /另一条线 · /);
 });

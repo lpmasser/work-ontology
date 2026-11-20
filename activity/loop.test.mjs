@@ -103,16 +103,23 @@ test('the loop reminds the recipient once, escalates once, and exits after the d
       { threadId: C1.slice('codex://threads/'.length), title: '主控', status: 'completed', updatedAt: T0 }
     ], nextCursor: null
   });
+  // 提醒送达、接手人那一轮结束后就算接住：例外撤销，循环退出。
   await write(f.cli, 'read/44444444-4444-4444-4444-444444444444.json', {
-    threadId: D.slice('codex://threads/'.length), title: 'D', status: 'running', from: 1, to: 1, totalTurns: 1,
-    turns: [{ turnId: 'd-1', turnNumber: 1, status: 'running', messages: [{ role: 'user', text: `C2 的交付到了\n\nSender: codex://threads/${EXEC}` }] }],
+    threadId: D.slice('codex://threads/'.length), title: 'D', status: 'completed', from: 1, to: 1, totalTurns: 1,
+    turns: [{
+      turnId: 'd-1', turnNumber: 1, status: 'completed',
+      messages: [
+        { role: 'user', text: first.message },
+        { role: 'agent', phase: 'final', text: '已接住，开始组批' }
+      ]
+    }],
     pendingQuestions: []
   });
   await running;
   assert.equal(failure, undefined);
   const state = await readActivityState(f.root);
   assert.equal(state.running, false);
-  assert.equal(state.reminded.length, 2);
+  assert.deepEqual(state.reminded, [], '接住后提醒记录一并撤掉');
   assert.equal(await stat(path.join(await activityHome(f.root), 'state.json')).then(() => true), true);
 });
 

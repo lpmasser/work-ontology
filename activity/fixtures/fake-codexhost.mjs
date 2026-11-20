@@ -20,7 +20,14 @@ if (argv[0] !== 'thread') throw new Error(`fake codexhost: 未知命令 ${argv.j
 const id = argv[2];
 if (argv[1] === 'list') print(await load('threads.json', { threads: [], nextCursor: null }));
 else if (argv[1] === 'watches') print(await load('watches.json', { watches: [] }));
-else if (argv[1] === 'read') print(await load(path.join('read', `${id}.json`), null));
+else if (argv[1] === 'read') {
+  const snapshot = await load(path.join('read', `${id}.json`), null);
+  if (snapshot === null) {
+    process.stderr.write(`${JSON.stringify({ error: { code: 'THREAD_NOT_FOUND', message: `fake codexhost: 没有 ${id} 的读结果` } })}\n`);
+    process.exit(1);
+  }
+  print(snapshot);
+}
 else if (argv[1] === 'send') {
   const busy = await load('busy.json', []);
   if (busy.includes(id)) {

@@ -24,10 +24,6 @@ export async function readActivityState(root) {
   return { ...state, running: Boolean(pid && alive(pid)) };
 }
 
-export async function saveActivityState(root, state) {
-  await save(path.join(await activityHome(root), 'state.json'), state);
-}
-
 // 已启用的活动检查在这里继续跑；空闲时退出，下一次 brief/check 再拉起。
 export async function ensureActivity(root, { cli }) {
   if (!cli) return;
@@ -89,9 +85,8 @@ async function remind(cli, index, result) {
   const groups = new Map();
   for (const exception of result.exceptions) {
     if (exception.blocking || exception.reminded) continue;
-    const key = `${exception.workId}\0${exception.recipient}`;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(exception);
+    if (!groups.has(exception.recipient)) groups.set(exception.recipient, []);
+    groups.get(exception.recipient).push(exception);
   }
   for (const items of groups.values()) {
     if (!await deliver(cli, items[0].recipient, items.map(item => reminderText(index, item)).join('\n'))) continue;
@@ -116,9 +111,9 @@ async function remind(cli, index, result) {
   }
 }
 
-async function tick(root, cli, state, clock) {
+async function tick(root, cli, state, clock, cache) {
   const vault = await loadVault(root);
-  const snapshot = await observeActivity(cli, { index: vault.index, state });
+  const snapshot = await observeActivity(cli, { index: vault.index, state, cache });
   const result = judgeActivity(vault.index, { threads: snapshot.threads, watches: snapshot.watches, now: clock(), state });
   result.state.threads = snapshot.positions;
   result.state.errors = snapshot.errors;
@@ -135,12 +130,14 @@ export async function runActivity(root, { cli = process.env.INFOHUB_ACTIVITY_CLI
   const stateFile = path.join(dir, 'state.json');
   const release = await lease(path.join(dir, 'activity.pid'), { ifBusy: true });
   if (!release) return;
+  // 本进程内存里保留上一份会话快照：没变的会话不重复读。
+  const cache = new Map();
   try {
     while (!signal?.aborted) {
       const state = await json(stateFile, {});
       let result;
       try {
-        result = await tick(root, cli, state, clock);
+        result = await tick(root, cli, state, clock, cache);
       } catch (error) {
         await save(stateFile, { ...state, error: `${iso()} ${error.message}` });
         throw error;
