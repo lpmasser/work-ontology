@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, mkdir, writeFile, readFile, copyFile, symlink, stat } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, readFile, copyFile, symlink } from 'node:fs/promises';
 import { findExecutable } from '../core/runtime.mjs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -607,6 +607,18 @@ async function activityFixture(t) {
   await write('read/44444444-4444-4444-4444-444444444444.json', { threadId: '44444444-4444-4444-4444-444444444444', title: 'D', status: 'completed', from: null, to: null, totalTurns: 0, turns: [], pendingQuestions: [] });
   await write(`read/${OWNER.slice('codex://threads/'.length)}.json`, { threadId: OWNER.slice('codex://threads/'.length), title: '主控', status: 'completed', from: null, to: null, totalTurns: 0, turns: [], pendingQuestions: [] });
   await write('watches.json', { watches: [{ threadId: EXECUTOR, notifyThreadId: '44444444-4444-4444-4444-444444444444', state: 'watching', turnId: 'turn-1', outcome: 'completed' }] });
+  // 模拟后台循环：接入时这一轮还在跑，之后它结束，记录里只剩一条未接的交件。
+  await mkdir(path.join(root, '.git/infohub-activity'), { recursive: true });
+  await writeFile(path.join(root, '.git/infohub-activity/state.json'), JSON.stringify({
+    observedAt: '2026-01-05T07:00:00.000Z',
+    threads: {
+      [EXECUTOR]: { updatedAt: T0, seenThrough: 1 },
+      '44444444-4444-4444-4444-444444444444': { updatedAt: T0, seenThrough: 0 },
+      [OWNER.slice('codex://threads/'.length)]: { updatedAt: T0, seenThrough: 0 }
+    },
+    turns: { [`${EXECUTOR}#1`]: { workId: 'work-a', dispatcher: OWNER, floor: 0, terminalAt: T0, pickedUp: false } },
+    streaks: {}, reminded: [], summary: {}, summaryAt: {}
+  }, null, 2));
   return { root, cli, work };
 }
 
@@ -640,6 +652,7 @@ test('activity shows the current owner, the open exception and new conclusions w
   const f = await activityFixture(t);
   await withFakeCodexhost(t, f.cli);
 
+  const seeded = await readFile(path.join(f.root, '.git/infohub-activity/state.json'), 'utf8');
   const text = await runCli(['--root', f.root, 'activity', 'work-a']);
   assert.equal(text.code, 0, text.stderr);
   assert.match(text.stdout, /面板化线 · (未观察|\d\d:\d\d)–\d\d:\d\d（观察 \d{4}-\d\d-\d\dT\d\d:\d\d[^）]*）/);
@@ -662,7 +675,7 @@ test('activity shows the current owner, the open exception and new conclusions w
   assert.match(missed.stderr, /找不到工作对象/);
 
   await assert.rejects(readFile(path.join(f.cli, 'sent.jsonl'), 'utf8'), { code: 'ENOENT' }, '只读查询不发消息');
-  await assert.rejects(stat(path.join(f.root, '.git/infohub-activity', 'state.json')), { code: 'ENOENT' }, '只读查询不写状态');
+  assert.equal(await readFile(path.join(f.root, '.git/infohub-activity/state.json'), 'utf8'), seeded, '只读查询不写状态');
 });
 
 test('activity reports itself as not enabled when this machine has no codexhost CLI', async t => {

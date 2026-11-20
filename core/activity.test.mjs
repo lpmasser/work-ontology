@@ -22,11 +22,20 @@ function turn(number, { sender, body = '干活', reply = null, status = 'complet
     messages: [{ role: 'user', text }, ...(reply ? [{ role: 'agent', phase: 'final', text: reply }] : [])]
   };
 }
-const thread = (turns, { id = EXECUTOR, title = 'C2 线', status = 'completed', updatedAt, pending = [] } = {}) => ({
-  threadId: id, title, status, pendingQuestions: pending,
+const thread = (turns, { id = EXECUTOR, title = 'C2 线', status = 'completed', updatedAt, createdAt, pending = [] } = {}) => ({
+  threadId: id, title, status, pendingQuestions: pending, createdAt,
   updatedAt: updatedAt ?? '2026-11-21T06:40:00.000Z', turns
 });
-const judge = (objects, threads, options = {}) => judgeActivity(index(...objects), { threads, ...options });
+// 默认按「这些会话上次已经观察过、读到的轮号是 0」来判：它们带来的轮都算新轮。
+const judge = (objects, threads, options = {}) => judgeActivity(index(...objects), {
+  threads,
+  ...options,
+  state: {
+    observedAt: '2026-01-01T00:00:00.000Z',
+    threads: Object.fromEntries(threads.map(thread => [thread.threadId, { updatedAt: thread.updatedAt, ...(thread.seenThrough === undefined ? { seenThrough: 0 } : { seenThrough: thread.seenThrough }) }])),
+    ...options.state,
+  },
+});
 
 test('a round belongs to the sender of its initiating input, and only a separate 不用回 line drops it', () => {
   const owner = work('work-a', C1);
@@ -229,4 +238,102 @@ test('settled rounds drop out of the stored records and reminders only keep open
   assert.equal(settled.settled, true);
   assert.deepEqual(settled.state.turns, {}, '已接住的轮不再留在记录里');
   assert.deepEqual(settled.state.reminded, [], '已撤项的提醒不再保留');
+});
+
+test('re-reading a responsible session does not turn withdrawn history back into new deliveries', () => {
+  const owner = work('work-a', C1);
+  const now = new Date('2026-11-21T06:50:00.000Z');
+  const history = thread([
+    turn(1, { sender: C2, reply: '旧的一轮，早就处理过' }),
+    turn(2, { sender: C2, reply: '也是旧的一轮' })
+  ], { id: threadId(C1), title: '主控' });
+  // 上次已读到第 2 轮：这两轮是历史，不再建记录、不再提醒。
+  const reread = judge([owner, work('work-b', C2)], [history], {
+    now, state: { observedAt: '2026-11-21T06:49:00.000Z', threads: { [history.threadId]: { updatedAt: '2026-11-21T06:40:00.000Z', seenThrough: 2 } } }
+  });
+  assert.deepEqual(reread.exceptions, []);
+  assert.deepEqual(reread.conclusions, []);
+  assert.deepEqual(reread.state.turns, {});
+  assert.equal(reread.settled, true);
+});
+
+test('a first observation only follows rounds that are still running', () => {
+  const owner = work('work-a', C2);
+  const threads = [thread([turn(1, { sender: C2, reply: '接入前就结束的轮' })], { id: threadId(C1), title: '主控' }),
+    thread([turn(1, { sender: C2, status: 'running' })], { id: EXECUTOR, title: '执行者', status: 'running' })];
+  const first = judgeActivity(index(owner), { threads, now: new Date('2026-11-21T06:50:00.000Z') });
+  assert.deepEqual(first.state.turns[`${C1.slice('codex://threads/'.length)}#1`], undefined, '历史轮不建档');
+  assert.deepEqual(first.rounds.map(round => round.turnNumber), [1]);
+  assert.deepEqual(first.exceptions, []);
+});
+
+test('a session created after the last observation is followed even when its round already ended', () => {
+  const owner = work('work-a', C1);
+  const created = '2026-11-21T06:49:00.000Z';
+  const fresh = thread([turn(1, { sender: C1, reply: '交件' })], { id: EXECUTOR, createdAt: created });
+  const result = judge([owner], [fresh], {
+    now: new Date('2026-11-21T06:55:00.000Z'),
+    state: { observedAt: '2026-11-21T06:48:00.000Z', threads: {} }
+  });
+  assert.deepEqual(result.exceptions.map(exception => [exception.kind, exception.turnNumber]), [['deliver', 1]]);
+});
+
+test('the recipient floor keeps the last observed turn number when that session is not in this observation', () => {
+  const owner = work('work-a', C1);
+  const delivered = turn(1, { sender: C1, reply: '交件' });
+  const state = {
+    observedAt: '2026-11-21T06:41:00.000Z',
+    threads: { [threadId(C1)]: { updatedAt: '2026-11-21T06:40:00.000Z', seenThrough: 7 }, [EXECUTOR]: { updatedAt: '2026-11-21T06:40:00.000Z', seenThrough: 0 } }
+  };
+  const first = judge([owner], [thread([delivered])], { now: new Date('2026-11-21T06:46:00.000Z'), state });
+  assert.equal(first.state.turns[`${EXECUTOR}#1`].floor, 7, '接手人不在 threads 里时不归零');
+  // 接手人回来了，历史轮里的旧提及不能算接件。
+  const back = judge([owner], [thread([delivered]), thread([
+    turn(5, { sender: `codex://threads/${EXECUTOR}`, body: '很早以前的一轮', reply: '旧' }),
+    turn(7, { sender: `codex://threads/${EXECUTOR}`, body: '更早以前的一轮', reply: '旧' })
+  ], { id: threadId(C1), title: 'C1', seenThrough: 7 })], {
+    now: new Date('2026-11-21T06:47:00.000Z'), state: { ...first.state, threads: { [threadId(C1)]: { updatedAt: '2026-11-21T06:40:00.000Z', seenThrough: 7 } } }
+  });
+  assert.equal(back.exceptions.filter(exception => exception.kind === 'deliver').length, 1);
+});
+
+test('after the escalation a finished round of the dispatcher itself withdraws the delivery', () => {
+  const owner = work('work-a', C1);
+  const delivered = turn(1, { sender: C1, reply: '交件' });
+  const state = {
+    observedAt: '2026-11-21T07:10:00.000Z',
+    threads: {
+      [threadId(C1)]: { updatedAt: '2026-11-21T06:40:00.000Z', seenThrough: 3 },
+      [EXECUTOR]: { updatedAt: '2026-11-21T06:40:00.000Z', seenThrough: 0 },
+      '44444444-4444-4444-4444-444444444444': { updatedAt: '2026-11-21T06:40:00.000Z', seenThrough: 1 }
+    },
+    reminded: [{ key: `deliver:${EXECUTOR}#1`, recipient: D, at: '2026-11-21T07:00:00.000Z', floor: 1 },
+      { key: `escalate:${EXECUTOR}#1`, recipient: C1, at: '2026-11-21T07:05:00.000Z', floor: 3 }]
+  };
+  const watches = [{ threadId: EXECUTOR, notifyThreadId: '44444444-4444-4444-4444-444444444444', turnId: delivered.turnId }];
+  const open = judge([owner, work('work-b', D)], [thread([delivered]), thread([], { id: '44444444-4444-4444-4444-444444444444', title: 'D' })], { now: new Date('2026-11-21T07:10:00.000Z'), state, watches });
+  assert.equal(open.exceptions.filter(exception => exception.kind === 'escalate').length, 1);
+
+  const decided = judge([owner, work('work-b', D)], [thread([delivered]), thread([], { id: '44444444-4444-4444-4444-444444444444', title: 'D' }),
+    thread([turn(4, { body: `面板化线 \`work-a\`，C2 线〔codex://threads/${EXECUTOR}〕第 1 轮交付后，接手人 … 五分钟仍未动`, reply: '收到，我直接处理' })], { id: threadId(C1), title: 'C1' })],
+  { now: new Date('2026-11-21T07:11:00.000Z'), state, watches });
+  assert.deepEqual(decided.exceptions, []);
+  assert.equal(decided.settled, true);
+});
+
+test('a watch notice to the dispatcher does not count as the named recipient picking the delivery up', () => {
+  const owner = work('work-a', C1);
+  const delivered = turn(1, { sender: C1, reply: '交件' });
+  const watches = [{ threadId: EXECUTOR, notifyThreadId: '44444444-4444-4444-4444-444444444444', turnId: delivered.turnId }];
+  const dispatcherNotified = thread([turn(2, {
+    watchNotice: `[codexhost thread watch] Read each Thread's result, then continue your task:\n\n- [C2 线](thread://${EXECUTOR}): completed`,
+    reply: '知道了'
+  })], { id: threadId(C1), title: 'C1' });
+  const result = judge([owner, work('work-b', D)],
+    [thread([delivered]), thread([], { id: '44444444-4444-4444-4444-444444444444', title: 'D' }), dispatcherNotified],
+    { now: new Date('2026-11-21T06:50:00.000Z'), watches });
+  const deliver = result.exceptions.filter(exception => exception.kind === 'deliver');
+  assert.equal(deliver.length, 1, '交件仍然指向 D');
+  assert.equal(deliver[0].recipient, D);
+  assert.equal(result.state.turns[`${EXECUTOR}#1`].pickedUp, false);
 });

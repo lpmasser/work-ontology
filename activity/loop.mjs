@@ -90,7 +90,11 @@ async function remind(cli, index, result) {
   }
   for (const items of groups.values()) {
     if (!await deliver(cli, items[0].recipient, items.map(item => reminderText(index, item)).join('\n'))) continue;
-    for (const item of items) result.state.reminded.push({ key: item.key, recipient: item.recipient, at: result.observedAt });
+    for (const item of items) {
+      // 记下发出提醒时对方读到哪儿：之后对方结束一轮提到执行者才算接住。
+      const floor = result.state.threads?.[threadId(item.recipient)]?.seenThrough ?? 0;
+      result.state.reminded.push({ key: item.key, recipient: item.recipient, at: result.observedAt, floor });
+    }
   }
 
   for (const work of result.works) {

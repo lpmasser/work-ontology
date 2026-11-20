@@ -50,23 +50,40 @@ async function until(fn, message) {
   throw new Error(message);
 }
 
-const delivered = {
-  turnId: 'turn-1', turnNumber: 1, status: 'completed',
-  messages: [{ role: 'user', text: `派给你\n\nSender: ${C1}` }, { role: 'agent', phase: 'final', text: '已在本地提交 486a69581。' }]
+const runningTurn = {
+  turnId: 'turn-1', turnNumber: 1, status: 'running',
+  messages: [{ role: 'user', text: `派给你\n\nSender: ${C1}` }]
+};
+const deliveredTurn = {
+  ...runningTurn, status: 'completed',
+  messages: [...runningTurn.messages, { role: 'agent', phase: 'final', text: '已在本地提交 486a69581。' }]
 };
 const emptyThread = (id, title) => ({ threadId: id, title, status: 'completed', updatedAt: T0, from: null, to: null, totalTurns: 0, turns: [], pendingQuestions: [] });
+
+// 循环先看到这一轮在跑，随后它结束：只有这种轮才会被当成新交件跟踪。
+async function finishRound(f, updatedAt) {
+  await write(f.cli, 'threads.json', {
+    threads: [
+      { threadId: EXEC, title: 'C2 线', status: 'completed', updatedAt },
+      { threadId: D.slice('codex://threads/'.length), title: 'D', status: 'completed', updatedAt: T0 },
+      { threadId: C1.slice('codex://threads/'.length), title: '主控', status: 'completed', updatedAt: T0 }
+    ], nextCursor: null
+  });
+  await write(f.cli, 'read/55555555-5555-5555-5555-555555555555.json',
+    { threadId: EXEC, title: 'C2 线', status: 'completed', updatedAt, from: 1, to: 1, totalTurns: 1, turns: [deliveredTurn], pendingQuestions: [] });
+}
 
 async function fixtures(f, { updatedAt = T0 } = {}) {
   await mkdir(path.join(f.cli, 'read'), { recursive: true });
   await write(f.cli, 'threads.json', {
     threads: [
-      { threadId: EXEC, title: 'C2 线', status: 'completed', updatedAt: T0 },
+      { threadId: EXEC, title: 'C2 线', status: 'running', updatedAt: T0 },
       { threadId: D.slice('codex://threads/'.length), title: 'D', status: 'completed', updatedAt },
       { threadId: C1.slice('codex://threads/'.length), title: '主控', status: 'completed', updatedAt }
     ], nextCursor: null
   });
   await write(f.cli, 'read/55555555-5555-5555-5555-555555555555.json',
-    { threadId: EXEC, title: 'C2 线', status: 'completed', updatedAt: T0, from: 1, to: 1, totalTurns: 1, turns: [delivered], pendingQuestions: [] });
+    { threadId: EXEC, title: 'C2 线', status: 'running', updatedAt: T0, from: 1, to: 1, totalTurns: 1, turns: [runningTurn], pendingQuestions: [] });
   await write(f.cli, 'read/44444444-4444-4444-4444-444444444444.json', emptyThread(D.slice('codex://threads/'.length), 'D'));
   await write(f.cli, 'read/11111111-1111-1111-1111-111111111111.json', emptyThread(C1.slice('codex://threads/'.length), '主控'));
   await write(f.cli, 'watches.json', { watches: [{ threadId: EXEC, notifyThreadId: D.slice('codex://threads/'.length), state: 'watching', turnId: 'turn-1', outcome: 'completed' }] });
@@ -83,6 +100,9 @@ test('the loop reminds the recipient once, escalates once, and exits after the d
   let failure;
   running.catch(error => { failure = error; });
 
+  // 循环先看到这一轮在跑，随后它结束，五分钟后再提醒接手人。
+  await until(async () => (await readActivityState(f.root)).threads?.[EXEC]?.seenThrough >= 1, '循环没有观察这一轮');
+  await finishRound(f, new Date(Date.parse(T0) + 60_000).toISOString());
   const first = await until(async () => (await sent(f.cli))[0], '五分钟后没有提醒接手人');
   assert.equal(first.threadId, D.slice('codex://threads/'.length));
   assert.match(first.message, /面板化线 `work-a`.*第 1 轮.*已结束五分钟/);
@@ -132,6 +152,8 @@ test('a busy recipient is left alone and reminded in a later window instead', as
   const abort = new AbortController();
   t.after(() => abort.abort());
   const running = runActivity(f.root, { cli: FAKE, intervalMs: 5, clock, signal: abort.signal });
+  await until(async () => (await readActivityState(f.root)).threads?.[EXEC]?.seenThrough >= 1, '循环没有观察这一轮');
+  await finishRound(f, new Date(Date.parse(T0) + 60_000).toISOString());
   await until(async () => minute > 12, '循环没有按窗口扫描');
   assert.deepEqual(await sent(f.cli), []);
 

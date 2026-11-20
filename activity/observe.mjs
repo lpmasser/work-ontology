@@ -19,7 +19,9 @@ export async function observeActivity(cli, { index, state, cache }) {
   const next = { ...positions };
   const candidates = new Map();
   for (const entry of listed) {
-    next[entry.threadId] = { updatedAt: entry.updatedAt, seenThrough: positions[entry.threadId]?.seenThrough ?? 0 };
+    // seenThrough 只记真正读过的会话：没读过的会话不能冒充成「已观察到 0 轮」。
+    const seen = positions[entry.threadId];
+    next[entry.threadId] = { updatedAt: entry.updatedAt, createdAt: entry.createdAt, ...(seen?.seenThrough === undefined ? {} : { seenThrough: seen.seenThrough }) };
     const relevant = owners.has(entry.threadId) || attributed.has(entry.threadId);
     const expand = first
       ? relevant || entry.status === 'running' || watched.has(entry.threadId)
@@ -28,7 +30,7 @@ export async function observeActivity(cli, { index, state, cache }) {
   }
   // 负责会话不在本次翻页结果里时，它的更新时间没变，仍要展开。
   for (const id of [...owners, ...attributed]) {
-    if (!candidates.has(id)) candidates.set(id, { threadId: id, updatedAt: positions[id]?.updatedAt ?? null });
+    if (!candidates.has(id)) candidates.set(id, { threadId: id, updatedAt: positions[id]?.updatedAt ?? null, createdAt: positions[id]?.createdAt });
   }
 
   const threads = [], errors = {};
@@ -49,9 +51,9 @@ export async function observeActivity(cli, { index, state, cache }) {
       continue;
     }
     const seenThrough = snapshot.turns.reduce((max, turn) => Math.max(max, turn.turnNumber), seen?.seenThrough ?? 0);
-    next[entry.threadId] = { updatedAt: entry.updatedAt ?? seen?.updatedAt ?? null, seenThrough };
-    // thread read 不带更新时间，终态变化的时间要取自列表。
-    const observed = { ...snapshot, updatedAt: entry.updatedAt ?? null };
+    next[entry.threadId] = { updatedAt: entry.updatedAt ?? seen?.updatedAt ?? null, createdAt: entry.createdAt ?? seen?.createdAt, seenThrough };
+    // thread read 不带更新时间和创建时间，这两个都取自列表。
+    const observed = { ...snapshot, updatedAt: entry.updatedAt ?? null, createdAt: entry.createdAt ?? seen?.createdAt ?? null };
     cache?.set(entry.threadId, observed);
     threads.push(observed);
   }
