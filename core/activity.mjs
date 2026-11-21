@@ -170,13 +170,18 @@ export function judgeActivity(index, { threads, watches = [], now = new Date(), 
       if (entry.terminalAt === null) {
         // 起点是接手人上一次观察时的位置：执行者一结束就送到的那一轮（例如 watch 通知）
         // 本来就落在上一次观察之后，不能因为本次观察时才看到结束就把它排除。
-        const seenBefore = state.threads?.[threadId(recipient)]?.seenThrough;
-        entry.floor = seenBefore !== undefined ? seenBefore : Math.max(maxTurn(threadById.get(threadId(recipient))) - 1, 0);
+        const floorOf = link => {
+          const seenBefore = state.threads?.[threadId(link)]?.seenThrough;
+          return seenBefore !== undefined ? seenBefore : Math.max(maxTurn(threadById.get(threadId(link))) - 1, 0);
+        };
+        entry.floor = floorOf(recipient);
+        // 负责会话和接手人可以不是同一个（交给 D）：各自的轮号各按各的起点算。
+        entry.ownerFloor = target.owner ? floorOf(target.owner) : null;
         entry.terminalAt = terminalAt(thread, turn === ordered.at(-1), now);
       }
       const conclusion = conclusionOf(turn);
       // 负责会话已经接住的结论（例如 watch 通知一到就读了）不再算新增，也就不进汇总。
-      const ownerPickedUp = pickedUpBy(threadById.get(threadId(target.owner)), thread.threadId, entry.floor);
+      const ownerPickedUp = target.owner ? pickedUpBy(threadById.get(threadId(target.owner)), thread.threadId, entry.ownerFloor ?? entry.floor) : false;
       if (target.owner) {
         cursor[target.owner] ??= {};
         if (conclusion) {

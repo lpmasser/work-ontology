@@ -403,3 +403,27 @@ test('a round the recipient answered as soon as it ended is not reported as uncl
   assert.deepEqual(unclaimed.exceptions.filter(exception => exception.turnNumber === 4).map(exception => exception.kind), ['deliver']);
   assert.deepEqual(unclaimed.conclusions.filter(conclusion => conclusion.turnNumber === 4).map(conclusion => conclusion.isNew), [true]);
 });
+
+test('with a delivery handed to D, the owner digest judges the owner against its own position', () => {
+  const owner = work('work-a', C1);
+  // 主控很早以前读过这个执行者上一轮的 watch 通知（第 900 轮），这一轮写了「交给 D」。
+  const finished = turn(4, { sender: C1, body: `接着做\n交给：${D}`, reply: '已交付' });
+  const executorThread = { ...thread([turn(3, { sender: C1, reply: '上一轮' }), finished]) };
+  const notice = n => ({ turnId: `d${n}`, turnNumber: n, status: 'completed', messages: [{ role: 'user', text: `[codexhost thread watch] Read each Thread's result, then continue your task:\n\n- [C2 线](thread://${EXECUTOR}): completed` }, { role: 'agent', phase: 'final', text: '读了' }] });
+  const plain = (n, text) => ({ turnId: `p${n}`, turnNumber: n, status: 'completed', messages: [{ role: 'user', text }, { role: 'agent', phase: 'final', text: '好' }] });
+  const ownerThread = { threadId: threadId(C1), title: '主控', status: 'completed', updatedAt: '2026-11-21T06:41:00.000Z', pendingQuestions: [], turns: [notice(900), plain(951, '别的事')] };
+  const dThread = { threadId: threadId(D), title: 'D', status: 'completed', updatedAt: '2026-11-21T06:41:00.000Z', pendingQuestions: [], turns: [notice(11)] };
+  const state = {
+    observedAt: '2026-11-21T06:39:00.000Z',
+    threads: {
+      [EXECUTOR]: { updatedAt: '2026-11-21T06:30:00.000Z', seenThrough: 3 },
+      [threadId(C1)]: { updatedAt: '2026-11-21T06:30:00.000Z', seenThrough: 950 },
+      [threadId(D)]: { updatedAt: '2026-11-21T06:30:00.000Z', seenThrough: 10 }
+    },
+    turns: {}
+  };
+  const result = judgeActivity(index(owner), { threads: [executorThread, ownerThread, dThread], now: new Date('2026-11-21T06:52:00.000Z'), state });
+  assert.deepEqual(result.exceptions.filter(exception => exception.turnNumber === 4), [], 'D 已经接住');
+  // 主控在第 950 轮之后没有再提到执行者：这条结论对它仍是新的，要进汇总。
+  assert.deepEqual(result.conclusions.filter(conclusion => conclusion.turnNumber === 4).map(conclusion => conclusion.isNew), [true]);
+});
