@@ -161,7 +161,10 @@ export function judgeActivity(index, { threads, watches = [], now = new Date(), 
         workId: target.id, executor: { id: thread.threadId, title: thread.title },
         turnNumber: turn.turnNumber, link: threadLink(thread.threadId), dispatcher: initiator.sender
       };
-      const { recipient: derived, blocking } = recipientOf(index, initiator, watchByTurn?.get(turn.turnId));
+      const watch = watchByTurn?.get(turn.turnId);
+      const { recipient: named, blocking } = recipientOf(index, initiator, watch);
+      // 派活的人已把这件事交给接任：没指定接手人的交件交给现任，不再叫醒前任（2026-11-21 换主控后三条提醒发给了前任）。
+      const derived = !watch?.notifyThreadId && !initiator.handover && target.owner && target.owner !== initiator.sender ? target.owner : named;
       const recipient = watchByTurn || !entry.recipient ? derived : entry.recipient;
       // 定了接手人就记下来：之后不取 watch 的轮沿用同一个人。
       if (watchByTurn && !blocking) entry.recipient = derived;
@@ -184,18 +187,26 @@ export function judgeActivity(index, { threads, watches = [], now = new Date(), 
         continue;
       }
       entry.running = false;
+      // 起点是接手人上一次观察时的位置：执行者一结束就送到的那一轮（例如 watch 通知）
+      // 本来就落在上一次观察之后，不能因为本次观察时才看到结束就把它排除。
+      const floorOf = link => {
+        const seenBefore = state.threads?.[threadId(link)]?.seenThrough;
+        return seenBefore !== undefined ? seenBefore : Math.max(maxTurn(threadById.get(threadId(link))) - 1, 0);
+      };
       if (entry.terminalAt === null) {
-        // 起点是接手人上一次观察时的位置：执行者一结束就送到的那一轮（例如 watch 通知）
-        // 本来就落在上一次观察之后，不能因为本次观察时才看到结束就把它排除。
-        const floorOf = link => {
-          const seenBefore = state.threads?.[threadId(link)]?.seenThrough;
-          return seenBefore !== undefined ? seenBefore : Math.max(maxTurn(threadById.get(threadId(link))) - 1, 0);
-        };
         entry.floor = floorOf(recipient);
+        entry.floorFor = recipient;
         // 负责会话和接手人可以不是同一个（交给 D）：各自的轮号各按各的起点算。
         entry.ownerFloor = target.owner ? floorOf(target.owner) : null;
         entry.terminalAt = terminalAt(thread, turn === ordered.at(-1), now);
+      } else {
+        // 接手人或负责会话换了（交接、或 watch 后来才取到）：起点按新人的轮号重算，
+        // 否则拿前任的轮号比，永远认不出接住，同一轮会反复提醒。
+        if (entry.floorFor && entry.floorFor !== recipient) entry.floor = floorOf(recipient);
+        if (entry.ownerFloorFor && entry.ownerFloorFor !== target.owner) entry.ownerFloor = target.owner ? floorOf(target.owner) : null;
+        entry.floorFor = recipient;
       }
+      entry.ownerFloorFor = target.owner ?? null;
       const conclusion = conclusionOf(turn);
       // 负责会话已经接住的结论（例如 watch 通知一到就读了）不再算新增，也就不进汇总。
       const ownerPickedUp = target.owner ? pickedUpBy(threadById.get(threadId(target.owner)), thread.threadId, entry.ownerFloor ?? entry.floor) : false;

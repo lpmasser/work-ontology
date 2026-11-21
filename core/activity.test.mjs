@@ -488,3 +488,31 @@ test('不用回 from whoever dispatched the executor still owes them the round, 
   assert.deepEqual(owners.exceptions, []);
   assert.deepEqual(owners.conclusions, []);
 });
+
+test('after a handover, a delivery the predecessor dispatched goes to the current owner and is judged by its own position', () => {
+  // 总协调 C1 派出执行者后交接给 C2；执行者交件时提醒只找现任，前任一条都不收。
+  const before = work('work-coord', C1);
+  const first = judge([before], [thread([turn(1, { sender: C1, body: '重翻定时任务', status: 'running' })], { status: 'running' })],
+    { now: new Date('2026-11-21T09:40:00.000Z') });
+  const after = work('work-coord', C2);
+  const finished = thread([turn(1, { sender: C1, body: '重翻定时任务', reply: '翻好了' })]);
+  const successor = thread([], { id: threadId(C2), title: '总协调接任' });
+  const handed = judgeActivity(index(after), {
+    threads: [finished, successor], now: new Date('2026-11-21T09:50:00.000Z'),
+    state: { ...first.state, threads: { [EXECUTOR]: { seenThrough: 1 }, [threadId(C2)]: { seenThrough: 8 } } }
+  });
+  assert.deepEqual(handed.exceptions.map(exception => [exception.kind, exception.recipient]), [['deliver', C2]]);
+
+  // 前任已为这一轮记下自己的起点（第 1440 轮）；现任读了提醒（第 9 轮），按现任自己的轮号认出接住，不再重复提醒。
+  const stale = structuredClone(handed.state);
+  stale.turns[`${EXECUTOR}#1`] = { ...stale.turns[`${EXECUTOR}#1`], recipient: C1, floor: 1440, floorFor: C1 };
+  const read = { turnId: 'c2-9', turnNumber: 9, status: 'completed', messages: [
+    { role: 'user', text: `多线协调 \`work-coord\`，C2 线〔${threadLink(EXECUTOR)}〕第 1 轮已结束五分钟，请读该轮结论接着做。` },
+    { role: 'agent', phase: 'final', text: '读过了' }
+  ] };
+  const again = judgeActivity(index(after), {
+    threads: [finished, thread([read], { id: threadId(C2), title: '总协调接任' })], now: new Date('2026-11-21T09:56:00.000Z'),
+    watches: [], state: { ...stale, threads: { [EXECUTOR]: { seenThrough: 1 }, [threadId(C2)]: { seenThrough: 8 } } }
+  });
+  assert.deepEqual(again.exceptions, []);
+});
