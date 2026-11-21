@@ -64,7 +64,14 @@ export async function lease(file, { ifBusy = false } = {}) {
       const handle = await open(file, 'wx', 0o600);
       await handle.writeFile(String(process.pid));
       await handle.close();
-      return async () => { if ((await readFile(file, 'utf8')) === String(process.pid)) await unlink(file); };
+      // 租约文件可能已被别人删掉或接手：这时本进程已不是持有者，什么都不用做。
+      return async () => {
+        const owner = await readFile(file, 'utf8').catch(error => {
+          if (error.code === 'ENOENT') return null;
+          throw error;
+        });
+        if (owner === String(process.pid)) await unlink(file);
+      };
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
       const pid = Number(await readFile(file, 'utf8'));
