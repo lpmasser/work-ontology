@@ -243,3 +243,40 @@ test('the loop stops on its own once its lease no longer belongs to it', async t
   await running;
   assert.equal((await readActivityState(f.root)).running, false);
 });
+
+test('a conclusion the responsible session already read through a watch is neither reminded nor summarised', async t => {
+  const f = await workspace(t);
+  await fixtures(f);
+  // 这一批没有挂 watch：接手人就是派活的负责会话本身。
+  await write(f.cli, 'watches.json', { watches: [] });
+  const ownerId = C1.slice('codex://threads/'.length);
+  const seen = {
+    threadId: ownerId, title: '主控', status: 'completed', from: 1, to: 1, totalTurns: 1, updatedAt: T0,
+    turns: [{
+      turnId: 'c1-1', turnNumber: 1, status: 'completed',
+      messages: [
+        { role: 'user', text: `[codexhost thread watch] Read each Thread's result, then continue your task:\n\n- [C2 线](thread://${EXEC}): completed` },
+        { role: 'agent', phase: 'final', text: '读了结果' }
+      ]
+    }],
+    pendingQuestions: []
+  };
+  await write(f.cli, `read/${ownerId}.json`, seen);
+  let minute = 0;
+  const clock = () => new Date(Date.parse(T0) + minute++ * 60_000);
+  const abort = new AbortController();
+  t.after(() => abort.abort());
+  const running = runActivity(f.root, { cli: FAKE, intervalMs: 5, clock, signal: abort.signal });
+  await until(async () => (await readActivityState(f.root)).threads?.[EXEC]?.seenThrough >= 1, '循环没有观察这一轮');
+  const finishedAt = new Date(Date.parse(T0) + 60_000).toISOString();
+  await finishRound(f, finishedAt);
+  // 结论已经在 watch 里读过、交件也算已接：没有交件提醒，也没有汇总，循环直接收敛退出。
+  await until(async () => {
+    const state = await readActivityState(f.root);
+    return !state.running || state.threads?.[EXEC]?.updatedAt === finishedAt;
+  }, '循环没有看到这一轮结束');
+  abort.abort();
+  await running;
+  assert.deepEqual(await sent(f.cli), []);
+  assert.ok(minute <= 20, '没有等到汇总窗口才收敛');
+});

@@ -367,3 +367,39 @@ test('a busy recipient is reported as busy instead of unclaimed, and is never es
   assert.match(after[0].detail, /五分钟未接/);
   assert.equal(finished.exceptions.filter(exception => exception.kind === 'escalate' && exception.key === `escalate:${EXECUTOR}#1`).length, 1, '老提醒已过五分钟，这一轮可以升级');
 });
+
+test('a round the recipient answered as soon as it ended is not reported as unclaimed', () => {
+  const M4 = 'codex://threads/08bcfb49-84c6-4338-8a2d-da9de614686f';
+  const executorId = '6d84da0c-1bba-40af-b7c6-d5ca7cc55c9f';
+  const link = `codex://threads/${executorId}`;
+  const owner = work('work-a', M4);
+  // 执行者第 4 轮结束，watch 通知立刻成了 M4 的第 135 轮，M4 当场读了结果。
+  const finished = turn(4, { sender: M4, reply: '已交付' });
+  const executorThread = { threadId: executorId, title: '本体图谱翻成面板', status: 'completed', updatedAt: '2026-11-21T06:40:00.000Z', turns: [
+    turn(3, { sender: M4, reply: '上一轮' }),
+    finished
+  ], pendingQuestions: [] };
+  const watcher = (n, body) => ({ turnId: `w${n}`, turnNumber: n, status: 'completed', messages: [{ role: 'user', text: body }, { role: 'agent', phase: 'final', text: '读了' }] });
+  const watchNotice = `[codexhost thread watch] Read each Thread's result, then continue your task:\n\n- [本体图谱翻成面板](thread://${executorId}): completed`;
+  const m4 = {
+    threadId: M4.slice('codex://threads/'.length), title: 'M4 主控', status: 'completed', updatedAt: '2026-11-21T06:41:00.000Z',
+    turns: [watcher(134, '早先的一轮'), watcher(135, watchNotice)], pendingQuestions: []
+  };
+  // 上一次观察：执行者还在第 3 轮，M4 已经读到 134 轮。
+  const state = {
+    observedAt: '2026-11-21T06:39:00.000Z',
+    threads: { [executorId]: { updatedAt: '2026-11-21T06:30:00.000Z', seenThrough: 3 }, [m4.threadId]: { updatedAt: '2026-11-21T06:30:00.000Z', seenThrough: 134 } },
+    turns: { [`${executorId}#3`]: { workId: 'work-a', dispatcher: M4, recipient: M4, floor: 130, terminalAt: '2026-11-21T06:20:00.000Z', pickedUp: true } }
+  };
+  const result = judge([owner], [executorThread, m4], { now: new Date('2026-11-21T06:52:00.000Z'), state });
+  assert.deepEqual(result.exceptions.filter(exception => exception.turnNumber === 4), [], '没有误报');
+  assert.equal(result.state.turns[`${executorId}#4`], undefined, '已接住的轮不留记录');
+  // 这条结论已经通过 watch 送到，不再进汇总。
+  assert.deepEqual(result.conclusions.filter(conclusion => conclusion.turnNumber === 4).map(conclusion => conclusion.isNew), [false]);
+
+  // 反例：接手人上一次观察之后没有再提到执行者，才算没接。
+  const silent = { ...m4, turns: [watcher(134, '早先的一轮')] };
+  const unclaimed = judge([owner], [executorThread, silent], { now: new Date('2026-11-21T06:52:00.000Z'), state });
+  assert.deepEqual(unclaimed.exceptions.filter(exception => exception.turnNumber === 4).map(exception => exception.kind), ['deliver']);
+  assert.deepEqual(unclaimed.conclusions.filter(conclusion => conclusion.turnNumber === 4).map(conclusion => conclusion.isNew), [true]);
+});

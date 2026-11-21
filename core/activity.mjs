@@ -168,15 +168,23 @@ export function judgeActivity(index, { threads, watches = [], now = new Date(), 
       }
       entry.running = false;
       if (entry.terminalAt === null) {
-        // 接手人本次不在观察范围时，用上次读到的位置兜底，不能退回 0。
-        entry.floor = Math.max(maxTurn(threadById.get(threadId(recipient))), state.threads?.[threadId(recipient)]?.seenThrough ?? 0);
+        // 起点是接手人上一次观察时的位置：执行者一结束就送到的那一轮（例如 watch 通知）
+        // 本来就落在上一次观察之后，不能因为本次观察时才看到结束就把它排除。
+        const seenBefore = state.threads?.[threadId(recipient)]?.seenThrough;
+        entry.floor = seenBefore !== undefined ? seenBefore : Math.max(maxTurn(threadById.get(threadId(recipient))) - 1, 0);
         entry.terminalAt = terminalAt(thread, turn === ordered.at(-1), now);
       }
       const conclusion = conclusionOf(turn);
+      // 负责会话已经接住的结论（例如 watch 通知一到就读了）不再算新增，也就不进汇总。
+      const ownerPickedUp = pickedUpBy(threadById.get(threadId(target.owner)), thread.threadId, entry.floor);
       if (target.owner) {
         cursor[target.owner] ??= {};
         if (conclusion) {
-          conclusions.push({ ...base, text: conclusion, isNew: turn.turnNumber > (cursor[target.owner][thread.threadId] ?? 0) });
+          conclusions.push({
+            ...base, text: conclusion,
+            isNew: !ownerPickedUp && turn.turnNumber > (cursor[target.owner][thread.threadId] ?? 0),
+            pickedUp: ownerPickedUp
+          });
           cursor[target.owner][thread.threadId] = Math.max(cursor[target.owner][thread.threadId] ?? 0, turn.turnNumber);
         }
       }
