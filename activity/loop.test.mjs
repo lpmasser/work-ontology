@@ -10,6 +10,10 @@ const C1 = 'codex://threads/11111111-1111-1111-1111-111111111111';
 const D = 'codex://threads/44444444-4444-4444-4444-444444444444';
 const EXEC = '55555555-5555-5555-5555-555555555555';
 const T0 = '2026-11-21T06:40:00.000Z';
+// 用例里的宿主一律用假 CLI；显式置空真实入口，直跑本文件也不会去调真的 codexhost。
+process.env.CODEXHOST_CLI_PATH = '';
+process.env.INFOHUB_ACTIVITY_CLI = '';
+
 const FAKE = path.resolve(import.meta.dirname, 'fixtures/fake-codexhost.mjs');
 
 const model = {
@@ -189,6 +193,7 @@ test('a busy recipient is left alone and reminded in a later window instead', as
 test('without a local codexhost CLI the activity loop is not started at all', async t => {
   const f = await workspace(t);
   assert.equal(findActivityCli({}), undefined);
+  assert.equal(findActivityCli({ CODEXHOST_CLI_PATH: '' }), undefined, '显式置空就是不开');
   assert.equal(findActivityCli({ CODEXHOST_CLI_PATH: '/opt/codexhost' }), '/opt/codexhost');
   await ensureActivity(f.root, { cli: undefined });
   await assert.rejects(stat(await activityHome(f.root)), { code: 'ENOENT' });
@@ -222,4 +227,19 @@ test('a failed observation is recorded and the next interval recovers instead of
   abort.abort();
   await running;
   assert.equal(failure, undefined);
+});
+
+test('the loop stops on its own once its lease no longer belongs to it', async t => {
+  const f = await workspace(t);
+  await fixtures(f);
+  let minute = 0;
+  const clock = () => new Date(Date.parse(T0) + minute++ * 60_000);
+  const abort = new AbortController();
+  t.after(() => abort.abort());
+  const running = runActivity(f.root, { cli: FAKE, intervalMs: 5, clock, signal: abort.signal });
+  await until(async () => (await readActivityState(f.root)).running, '循环没有拿到租约');
+  // 临时库被清掉或被别的进程接手：本进程不再持有租约，自己退出，不再去读 Host。
+  await rm(path.join(await activityHome(f.root), 'activity.pid'));
+  await running;
+  assert.equal((await readActivityState(f.root)).running, false);
 });

@@ -200,7 +200,7 @@ async function handleActivity(root, args, index, cli) {
   }
 
   // 只读查询：读最近一次观察位置，不写状态、不发消息、不推进汇总位置（那是后台循环的事）。
-  // 循环在跑且它刚算过一轮时直接用那份结果；否则自己观察。
+  // 后台在跑就直接用它的结果（过期也照样用，注明过期与它的错误）；只有它根本没在跑才自己观察。
   const background = await readActivityResult(root);
   const state = background.state;
   let result = background.result, source = '后台结果', unreadable = state.errors ?? {};
@@ -212,11 +212,12 @@ async function handleActivity(root, args, index, cli) {
   }
   // 健康信息描述后台循环：查询自己观察成功不代表循环恢复了。
   const lastSuccessAt = state.lastSuccessAt ?? null;
-  const health = formatHealth({ error: state.error, lastSuccessAt });
+  const stale = Boolean(background.result && !background.fresh);
+  const health = [stale ? '后台结果已过期，后台循环还在按间隔重试' : null, formatHealth({ error: state.error, lastSuccessAt })].filter(Boolean).join('\n') || null;
   const notes = [health, formatErrors(unreadable)].filter(Boolean).join('\n');
   const head = {
     version: 1, enabled: true, running: state.running, error: state.error ?? null,
-    lastSuccessAt, observedAt: result.observedAt, source, unreadable,
+    lastSuccessAt, observedAt: result.observedAt, source, stale, unreadable,
   };
   const section = work => ({
     work,

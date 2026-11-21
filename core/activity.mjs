@@ -98,6 +98,7 @@ function workOf(index, id) {
  * 状态只带上一次的观察位置、未结例外、已提醒收件人和各负责会话的汇总截止位置。
  */
 export function judgeActivity(index, { threads, watches = [], now = new Date(), state = {} }) {
+  // watches 为 null 表示这一轮没取 watch：接手人沿用记录里的，不重新猜。
   const nowMs = now.getTime();
   const works = currentOwners(index);
   const worksByOwner = new Map();
@@ -106,7 +107,7 @@ export function judgeActivity(index, { threads, watches = [], now = new Date(), 
     worksByOwner.get(work.owner).push(work);
   }
   const threadById = new Map(threads.map(thread => [thread.threadId, thread]));
-  const watchByTurn = new Map(watches.filter(watch => watch.turnId).map(watch => [watch.turnId, watch]));
+  const watchByTurn = watches === null ? null : new Map(watches.filter(watch => watch.turnId).map(watch => [watch.turnId, watch]));
   const observed = structuredClone(state.turns ?? {});
   const streaks = { ...(state.streaks ?? {}) };
   const reminded = [...(state.reminded ?? [])];
@@ -143,7 +144,10 @@ export function judgeActivity(index, { threads, watches = [], now = new Date(), 
         workId: target.id, executor: { id: thread.threadId, title: thread.title },
         turnNumber: turn.turnNumber, link: threadLink(thread.threadId), dispatcher: initiator.sender
       };
-      const { recipient, blocking } = recipientOf(index, initiator, watchByTurn.get(turn.turnId));
+      const { recipient: derived, blocking } = recipientOf(index, initiator, watchByTurn?.get(turn.turnId));
+      const recipient = watchByTurn || !entry.recipient ? derived : entry.recipient;
+      // 定了接手人就记下来：之后不取 watch 的轮沿用同一个人。
+      if (watchByTurn && !blocking) entry.recipient = derived;
       attributed.push({ turn, work: target, recipient, key, record: entry, blocking });
 
       if (blocking) {

@@ -14,14 +14,13 @@ export async function activityHome(root) {
   return path.join(await realpath(root), '.git/infohub-activity');
 }
 
-// 后台每轮把判断结果写在这里：循环在跑且结果在一个检查间隔的两倍以内时，查询直接读它，
-// 不必再读一遍所有会话。
+// 后台每轮把判断结果写在这里：循环在跑时查询直接读它，不必再读一遍所有会话。
+// fresh 说明它是否还在两个检查间隔以内；过期时调用方照样用它，并注明过期和后台的错误。
 export async function readActivityResult(root) {
   const state = await readActivityState(root);
-  if (!state.running) return { state, result: null };
+  if (!state.running) return { state, result: null, fresh: false };
   const result = await json(path.join(await activityHome(root), 'result.json'), null);
-  const fresh = result && Date.now() - Date.parse(result.observedAt) <= ACTIVITY_INTERVAL_MS * 2;
-  return { state, result: fresh ? result : null };
+  return { state, result, fresh: Boolean(result && Date.now() - Date.parse(result.observedAt) <= ACTIVITY_INTERVAL_MS * 2) };
 }
 
 export async function readActivityState(root) {
@@ -137,6 +136,14 @@ async function tick(root, cli, state, clock, cache) {
   return result;
 }
 
+// 租约文件是这台机器只有一个检查进程的唯一凭据：文件被删或被别人接手就不再继续跑。
+async function holdsLease(file) {
+  return await readFile(file, 'utf8').catch(error => {
+    if (error.code === 'ENOENT') return '';
+    throw error;
+  }) === String(process.pid);
+}
+
 function pause(intervalMs, signal) {
   return new Promise(resolve => {
     const finish = () => {
@@ -160,6 +167,10 @@ export async function runActivity(root, { cli = process.env.INFOHUB_ACTIVITY_CLI
   const cache = new Map();
   try {
     while (!signal?.aborted) {
+      if (!await holdsLease(path.join(dir, 'activity.pid'))) {
+        console.log(`${iso()} 租约已不在本进程，退出活动检查`);
+        return;
+      }
       const state = await json(stateFile, {});
       let result;
       try {

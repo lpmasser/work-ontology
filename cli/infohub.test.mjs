@@ -2,14 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, mkdir, writeFile, readFile, copyFile, symlink } from 'node:fs/promises';
 import { findExecutable } from '../core/runtime.mjs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { main } from './infohub.mjs';
 
-// 这些用例自己决定用哪个 codexhost：不先清掉调用方 shell 里的入口，
-// brief/check 会去拉起真实的活动循环，往临时目录里写字。
+// 这些用例自己决定用哪个 codexhost。先清掉调用方 shell 里的入口，否则 brief/check
+// 会带着真实 CLI 拉起分离的活动循环；CLI 路径显式置空（而不是删掉），
+// 解析时就不会再去 PATH 里找真的 codexhost。
 const ambientCli = process.env.CODEXHOST_CLI_PATH;
-delete process.env.CODEXHOST_CLI_PATH;
+process.env.CODEXHOST_CLI_PATH = '';
 process.on('exit', () => { if (ambientCli !== undefined) process.env.CODEXHOST_CLI_PATH = ambientCli; });
 
 const testModel = {
@@ -593,7 +595,9 @@ async function activityFixture(t) {
   await mkdir(path.join(cli, 'read'), { recursive: true });
   await mkdir(path.join(root, 'ontology'), { recursive: true });
   await mkdir(path.join(root, 'docs'), { recursive: true });
-  await mkdir(path.join(root, '.git'), { recursive: true });
+  await mkdir(path.join(root, '.git/infohub-activity'), { recursive: true });
+  // 占住租约：这份库里已有活动检查在跑，brief/check 不会再拉起分离进程。
+  await writeFile(path.join(root, '.git/infohub-activity/activity.pid'), String(process.pid));
   await writeFile(path.join(root, 'ontology/ontology.json'), JSON.stringify({
     folders: ['docs'], primaryKey: 'ontology_id',
     properties: { ontology_id: { type: 'text', required: true }, ontology_type: { type: 'text', required: true }, title: { type: 'text', required: true } },
@@ -728,7 +732,7 @@ test('activity without a work ID lists every work of the calling session, whiche
   assert.match(text.stdout, /另一条线 · /);
 });
 
-test('a fresh background result answers the query without calling codexhost; a stale one makes the query observe', async t => {
+test('a stale background result is still shown while the loop runs; only a stopped loop makes the query observe', async t => {
   const f = await activityFixture(t);
   await withFakeCodexhost(t, f.cli);
   const dir = path.join(f.root, '.git/infohub-activity');
@@ -756,12 +760,28 @@ test('a fresh background result answers the query without calling codexhost; a s
   assert.equal(await calls(), before, '新鲜的后台结果不调用 codexhost');
   assert.equal(JSON.parse((await runCli(['--root', f.root, 'activity', '--exceptions', '--json'])).stdout).source, '后台结果');
 
-  // 过期：查询自己观察，并如实写下这是本次观察。
-  await writeFile(path.join(dir, 'result.json'), JSON.stringify({ ...background, observedAt: new Date(Date.now() - 5 * 60_000).toISOString() }));
+  // 过期但循环还在跑：照样显示那份旧结果，注明过期和后台的错误，不调用 codexhost。
+  const observedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+  await writeFile(path.join(dir, 'result.json'), JSON.stringify({ ...background, observedAt }));
+  const state = JSON.parse(await readFile(path.join(dir, 'state.json'), 'utf8'));
+  await writeFile(path.join(dir, 'state.json'), JSON.stringify({ ...state, error: '第 2 次观察失败：codexhost thread watches: null', lastSuccessAt: observedAt }));
   const stale = await runCli(['--root', f.root, 'activity', '--exceptions']);
   assert.equal(stale.code, 0, stale.stderr);
-  assert.match(stale.stdout, /（观察 .*，本次观察）/);
-  assert.ok(await calls() > before, '过期的后台结果改为自己观察');
+  assert.match(stale.stdout, /（观察 .*，后台结果）/);
+  assert.match(stale.stdout, /后台结果已过期/);
+  assert.match(stale.stdout, /最近错误 第 2 次观察失败：codexhost thread watches: null/);
+  assert.match(stale.stdout, /C2 线 #1 → codex:\/\/threads\/4444/, '仍然显示旧结果里的交件');
+  assert.equal(await calls(), before, '过期的后台结果也不调用 codexhost');
+  const staleJson = JSON.parse((await runCli(['--root', f.root, 'activity', '--exceptions', '--json'])).stdout);
+  assert.equal(staleJson.stale, true);
+  assert.equal(staleJson.observedAt, observedAt);
+
+  // 后台根本没在跑：查询自己观察。
+  await rm(path.join(dir, 'activity.pid'));
+  const alone = await runCli(['--root', f.root, 'activity', '--exceptions']);
+  assert.equal(alone.code, 0, alone.stderr);
+  assert.match(alone.stdout, /（观察 .*，本次观察）/);
+  assert.ok(await calls() > before, '没有后台进程时查询自己观察');
   const observed = JSON.parse((await runCli(['--root', f.root, 'activity', 'work-a', '--json'])).stdout);
   assert.equal(observed.source, '本次观察');
   assert.deepEqual(observed.conclusions.map(conclusion => conclusion.text), ['已在本地提交 486a69581。']);
@@ -789,4 +809,14 @@ test('activity shows the last observation error and how long ago it last succeed
   const json = JSON.parse((await runCli(['--root', f.root, 'activity', 'work-a', '--json'])).stdout);
   assert.equal(json.error, '第 3 次观察失败：codexhost thread watches: null');
   assert.equal(json.lastSuccessAt, observedAt);
+});
+
+test('check and brief never start a detached activity loop from the test vault', async t => {
+  const f = await activityFixture(t);
+  // 租约被本进程占着：命令自己看得到「在跑」，不会再拉起分离进程。
+  const started = await runCli(['--root', f.root, 'check', path.join(f.root, 'docs/work.md')]);
+  assert.equal(started.code, 0, started.stderr);
+  const listed = spawnSync('ps', ['-axo', 'pid=,command='], { encoding: 'utf8' }).stdout || '';
+  assert.ok(!listed.split('\n').some(line => line.includes(f.root) && line.includes('activity run')), '没有拉起 activity run');
+  assert.equal(await readFile(path.join(f.root, '.git/infohub-activity/activity.pid'), 'utf8'), String(process.pid));
 });

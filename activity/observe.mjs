@@ -1,20 +1,25 @@
 import { listThreads, readMessages, listWatches } from './codexhost.mjs';
 import { currentOwners, threadId } from '../core/activity.mjs';
 
+const STOPPED = ['completed', 'failed', 'interrupted'];
+
 /**
  * 要展开的会话：负责会话、出过可归属轮次的执行者会话（这两类永远展开），
  * 以及列表里更新时间变了的会话（新派出的会话只在这里出现）。
  * 首次接入只展开负责会话、仍在运行的轮和挂着的 watch，不翻整机历史。
  * cache 是本进程内存里的上一份快照，没变的会话不重复读。
+ *
+ * 返回的 watches 为 null 表示这一轮没去取：`thread watches` 在 Host 忙时要几十秒，
+ * 只有首次接入和这一轮真有刚结束、要定接手人的轮时才取。
  */
 export async function observeActivity(cli, { index, state, cache }) {
   const listed = await listThreads(cli, state.observedAt);
   const positions = state.threads ?? {};
   const owners = new Set(currentOwners(index).map(work => threadId(work.owner)));
   const attributed = new Set(Object.keys(state.turns ?? {}).map(key => key.split('#')[0]));
-  const watches = await listWatches(cli);
-  const watched = new Set(watches.map(watch => watch.threadId));
   const first = !state.threads;
+  const watches = first ? await listWatches(cli) : null;
+  const watched = new Set((watches ?? []).map(watch => watch.threadId));
 
   const next = { ...positions };
   const candidates = new Map();
@@ -58,5 +63,11 @@ export async function observeActivity(cli, { index, state, cache }) {
     threads.push(observed);
   }
   for (const id of cache?.keys() ?? []) if (!owners.has(id) && !attributed.has(id)) cache.delete(id);
-  return { threads, errors, watches, positions: next };
+  // 有刚结束的轮才需要知道谁接手：上一轮还看到它在跑，或者是上次观察之后才出现的轮。
+  const records = state.turns ?? {};
+  const ended = threads.some(thread => thread.turns.some(turn => STOPPED.includes(turn.status)
+    && (turn.turnNumber > (positions[thread.threadId]?.seenThrough ?? 0)
+      || records[`${thread.threadId}#${turn.turnNumber}`]?.running
+      || (records[`${thread.threadId}#${turn.turnNumber}`] && !records[`${thread.threadId}#${turn.turnNumber}`].recipient))));
+  return { threads, errors, watches: watches ?? (ended ? await listWatches(cli) : null), positions: next };
 }

@@ -4,7 +4,9 @@ import { findExecutable } from '../core/runtime.mjs';
 // 以本机外部客户端身份调用：去掉调用方的会话身份和运行时入口，列表才跨工作区，后台消息也不带 Sender。
 const CLIENT_ENV = ['CODEXHOST_THREAD_ID', 'CODEX_THREAD_ID', 'CODEXHOST_RUNTIME_TOKEN', 'CODEXHOST_RUNTIME_ENDPOINT'];
 
+// 显式置空（包括空的 CODEXHOST_CLI_PATH）表示这台机器不开活动检查：测试和安装脚本都用它。
 export function findActivityCli(env = process.env) {
+  if (env.CODEXHOST_CLI_PATH === '') return undefined;
   return env.CODEXHOST_CLI_PATH || findExecutable('codexhost');
 }
 
