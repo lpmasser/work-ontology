@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { judgeActivity, readInitiator, currentOwners, threadId, DELIVERY_GRACE_MS } from './activity.mjs';
+import { judgeActivity, readInitiator, currentOwners, threadId, threadLink, DELIVERY_GRACE_MS } from './activity.mjs';
 
 const C1 = 'codex://threads/11111111-1111-1111-1111-111111111111';
 const C2 = 'codex://threads/22222222-2222-2222-2222-222222222222';
+const C3 = 'codex://threads/33333333-3333-3333-3333-333333333333';
 const D = 'codex://threads/44444444-4444-4444-4444-444444444444';
 const EXECUTOR = '55555555-5555-5555-5555-555555555555';
 
@@ -37,20 +38,22 @@ const judge = (objects, threads, options = {}) => judgeActivity(index(...objects
   },
 });
 
-test('a round belongs to the sender of its initiating input, and only a separate 不用回 line drops it', () => {
+test('a round belongs to the sender of its initiating input, and only a line ending in 不用回 drops it', () => {
   const owner = work('work-a', C1);
   const other = work('work-b', C2);
   const input = [
     turn(1, { sender: C1, reply: 'A 已交付' }),
     turn(2, { sender: C2, reply: 'B 已交付' }),
     turn(3, { sender: C1, body: '正文提到不用回这三个字，仍要跟进', reply: '收到' }),
-    turn(4, { sender: C1, body: '这一轮先别管我\n不用回', reply: '好' }),
+    turn(4, { sender: C3, body: '这一轮先别管我\n不用回', reply: '好' }),
     turn(5, { body: '没有发送者的一轮', reply: '匿名的' }),
-    turn(6, { watchNotice: "[codexhost thread watch] Read each Thread's result, then continue your task:\n\n- [C2](thread://x): completed", reply: '已接' })
+    turn(6, { watchNotice: "[codexhost thread watch] Read each Thread's result, then continue your task:\n\n- [C2](thread://x): completed", reply: '已接' }),
+    // 2026-11-21 总协调群发「可以开始替换」时把它写在句末，各线的回执又被汇总回总协调。
+    turn(7, { sender: C3, body: '换完合进 develop 后在你的工作对象里记一句，不用回我。', reply: '收到' })
   ];
-  const first = judge([owner, other], [thread(input)], { now: new Date('2026-11-21T06:41:00.000Z') });
+  const first = judge([owner, other, work('work-d', D), work('work-c3', C3)], [thread(input, { id: threadId(D) })], { now: new Date('2026-11-21T06:41:00.000Z') });
   assert.deepEqual(first.conclusions.map(entry => [entry.turnNumber, entry.workId]), [[1, 'work-a'], [2, 'work-b'], [3, 'work-a']]);
-  const later = judge([owner, other], [thread(input)], { now: new Date('2026-11-21T06:46:00.000Z'), state: first.state });
+  const later = judge([owner, other, work('work-d', D), work('work-c3', C3)], [thread(input, { id: threadId(D) })], { now: new Date('2026-11-21T06:46:00.000Z'), state: first.state });
   const recipients = later.exceptions.filter(exception => exception.kind === 'deliver').map(exception => exception.recipient).sort();
   assert.deepEqual([...new Set(recipients)], [C1, C2]);
 });
@@ -97,15 +100,12 @@ test('a delivery is only raised after five minutes, and a picked-up delivery is 
   assert.deepEqual(picked.exceptions.filter(exception => exception.kind === 'deliver'), []);
   assert.equal(picked.settled, true, '接住后退出条件成立');
 
-  // 只是被我们的提醒叫醒、还没结束的不算接住；提醒那一轮结束即撤项。
+  // 被我们的提醒叫醒、这一轮还在跑，就已经是在处理了：不再挂成没接。
   const remindedThread = thread([turn(1, { sender: `codex://threads/${EXECUTOR}`, body: '面板化线 `work-a`，C2 线〔codex://threads/5555〕第 1 轮已结束五分钟', status: 'running' })],
     { id: threadId(C1), title: 'C1', status: 'running' });
   const awake = judge([owner], [thread([delivered]), remindedThread], { now: new Date(Date.parse('2026-11-21T07:00:00.000Z')), state: late.state });
-  assert.equal(awake.exceptions.filter(exception => exception.kind === 'deliver').length, 1);
-  const answered = judge([owner], [thread([delivered]), thread([{ ...remindedThread.turns[0], status: 'completed', messages: [...remindedThread.turns[0].messages, { role: 'agent', phase: 'final', text: '已接手' }] }], { id: threadId(C1), title: 'C1', status: 'completed' })],
-    { now: new Date(Date.parse('2026-11-21T07:05:00.000Z')), state: awake.state });
-  assert.deepEqual(answered.exceptions.filter(exception => exception.kind === 'deliver'), []);
-  assert.equal(answered.settled, true);
+  assert.deepEqual(awake.exceptions.filter(exception => exception.kind === 'deliver'), []);
+  assert.equal(awake.settled, true);
 });
 
 test('an unclaimed delivery escalates to the dispatcher once, and names the blocking reason instead', () => {
@@ -426,4 +426,65 @@ test('with a delivery handed to D, the owner digest judges the owner against its
   assert.deepEqual(result.exceptions.filter(exception => exception.turnNumber === 4), [], 'D 已经接住');
   // 主控在第 950 轮之后没有再提到执行者：这条结论对它仍是新的，要进汇总。
   assert.deepEqual(result.conclusions.filter(conclusion => conclusion.turnNumber === 4).map(conclusion => conclusion.isNew), [true]);
+});
+
+// 以下几条按 2026-11-21 白天真实运行里多发或漏发的消息写成（取数见 InfoHub material「分工体系第一步白天运行取数」）。
+
+test('a recipient turn that is still running, or a steer into it, already counts as picking the delivery up', () => {
+  const owner = work('work-a', C1);
+  const delivered = turn(4, { sender: C1, reply: '镜像修好了' });
+  const steered = { turnId: 'c1-61', turnNumber: 61, status: 'running', messages: [
+    { role: 'user', text: '巡查' },
+    { role: 'user', text: `镜像修好了\n不用回\n\nSender: ${threadLink(EXECUTOR)}` }
+  ] };
+  const ownerThread = thread([steered], { id: threadId(C1), title: '总协调', status: 'running' });
+  const state = {
+    observedAt: '2026-11-21T06:39:00.000Z',
+    threads: { [EXECUTOR]: { seenThrough: 3 }, [threadId(C1)]: { seenThrough: 60 } },
+    turns: { [`${EXECUTOR}#4`]: { workId: 'work-a', dispatcher: C1, recipient: C1, floor: null, terminalAt: null, pickedUp: false, running: true } }
+  };
+  const result = judgeActivity(index(owner), { threads: [thread([delivered]), ownerThread], now: new Date('2026-11-21T06:52:00.000Z'), state });
+  assert.deepEqual(result.exceptions, [], '不报接手人在忙，也不报没接');
+  assert.deepEqual(result.conclusions.map(conclusion => conclusion.isNew), [false], '汇总里不再重复');
+});
+
+test('a later round the recipient started on the executor means the earlier delivery was read', () => {
+  const owner = work('work-a', C1);
+  // 第 17 轮交件后，接手人让它接着做，第 18 轮正在跑；五分钟后不再提醒第 17 轮。
+  const completed = turn(17, { sender: C1, reply: '交件' });
+  const coordinator = thread([], { id: threadId(C1), title: '总协调' });
+  const after = (later, objects = [owner]) => {
+    const executorThread = thread([completed, later], { status: 'running' });
+    const first = judge(objects, [executorThread, coordinator], { now: new Date('2026-11-21T07:00:00.000Z') });
+    return judgeActivity(index(...objects), { threads: [executorThread, coordinator], now: new Date('2026-11-21T07:06:00.000Z'), state: first.state });
+  };
+  const resumed = after(turn(18, { sender: C1, body: '服务重启完了，接着做', status: 'running' }));
+  assert.deepEqual(resumed.exceptions.filter(exception => exception.turnNumber === 17), []);
+
+  // 反例：后面那一轮是旁人开的，接手人仍没读过。
+  const unread = after(turn(18, { sender: C2, body: '顺带看一下这个', status: 'running' }), [owner, work('work-b', C2)]);
+  assert.deepEqual(unread.exceptions.filter(exception => exception.turnNumber === 17).map(exception => [exception.kind, exception.recipient]), [['deliver', C1]]);
+});
+
+test('不用回 from whoever dispatched the executor still owes them the round, but a notice to another owner does not', () => {
+  const coordination = work('work-coord', C1);
+  const line = work('work-m3', C2);
+  // 总协调派了一个执行者；重启后群发「接着做，不用回」，执行者这一轮交件后总协调四十多分钟没读。
+  const first = judge([coordination, line], [thread([turn(1, { sender: C1, body: '修登录', status: 'running' })], { status: 'running' })],
+    { now: new Date('2026-11-21T06:41:00.000Z') });
+  const resumed = turn(2, { sender: C1, body: '服务重启完了，接着做\n不用回', reply: '修好并合入 develop，128 已验证' });
+  const later = judgeActivity(index(coordination, line), {
+    threads: [thread([turn(1, { sender: C1, body: '修登录', status: 'interrupted', reply: '已停' }), resumed]), thread([], { id: threadId(C1), title: '总协调' })],
+    now: new Date('2026-11-21T06:50:00.000Z'),
+    state: { ...first.state, threads: { [EXECUTOR]: { seenThrough: 1 }, [threadId(C1)]: { seenThrough: 0 } } }
+  });
+  assert.deepEqual(later.exceptions.filter(exception => exception.turnNumber === 2).map(exception => [exception.kind, exception.recipient]), [['deliver', C1]]);
+
+  // 同一句群发给另一条线的负责会话：只是通知，它的回执不欠总协调。
+  const notice = turn(5, { sender: C1, body: '可以开始替换了，换完记进工作对象，不用回我。', reply: '收到，已开始' });
+  const lineThread = thread([notice], { id: threadId(C2), title: 'M3' });
+  const owners = judge([coordination, line], [lineThread, thread([], { id: threadId(C1), title: '总协调' })],
+    { now: new Date('2026-11-21T06:50:00.000Z'), state: { dispatchers: { [threadId(C2)]: [C1] } } });
+  assert.deepEqual(owners.exceptions, []);
+  assert.deepEqual(owners.conclusions, []);
 });

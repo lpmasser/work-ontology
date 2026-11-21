@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { main } from './infohub.mjs';
+import { clock } from '../core/activity.mjs';
 
 // 这些用例自己决定用哪个 codexhost。先清掉调用方 shell 里的入口，否则 brief/check
 // 会带着真实 CLI 拉起分离的活动循环；CLI 路径显式置空（而不是删掉），
@@ -665,7 +666,7 @@ test('activity shows the current owner, the open exception and new conclusions w
   const seeded = await readFile(path.join(f.root, '.git/infohub-activity/state.json'), 'utf8');
   const text = await runCli(['--root', f.root, 'activity', 'work-a']);
   assert.equal(text.code, 0, text.stderr);
-  assert.match(text.stdout, /面板化线 · (未观察|\d\d:\d\d)–\d\d:\d\d（观察 \d{4}-\d\d-\d\dT\d\d:\d\d[^）]*）/);
+  assert.match(text.stdout, /面板化线 · (未观察|\d\d:\d\d)–\d\d:\d\d（观察 \d\d:\d\d:\d\d，[^）]*）/);
   assert.match(text.stdout, new RegExp(`C2 线 #1 → ${NEXT.replaceAll('/', '\\/')}，第 1 轮交付后五分钟未接`));
   assert.match(text.stdout, /C2 线 #1〔执行者报告〕“已在本地提交 486a69581。”〔codex:\/\/threads\/5555/);
 
@@ -805,7 +806,7 @@ test('activity shows the last observation error and how long ago it last succeed
   const off = await runCli(['--root', f.root, 'activity', 'work-a']);
   assert.equal(off.code, 0, off.stderr);
   assert.match(off.stdout, /最近错误 第 3 次观察失败：codexhost thread watches: null/);
-  assert.match(off.stdout, new RegExp(`后台上次成功观察 ${observedAt}（\\d+ 秒前）`));
+  assert.match(off.stdout, new RegExp(`后台上次成功观察 ${clock(observedAt, true)}（\\d+ 秒前）`));
   const json = JSON.parse((await runCli(['--root', f.root, 'activity', 'work-a', '--json'])).stdout);
   assert.equal(json.error, '第 3 次观察失败：codexhost thread watches: null');
   assert.equal(json.lastSuccessAt, observedAt);

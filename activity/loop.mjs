@@ -4,7 +4,7 @@ import path from 'node:path';
 import { loadVault } from '../core/vault.mjs';
 import { currentRuntime } from '../core/runtime.mjs';
 import { json, save, lease, alive, iso } from '../sync/git.mjs';
-import { judgeActivity, describeWork, threadId, SUMMARY_INTERVAL_MS } from '../core/activity.mjs';
+import { judgeActivity, describeWork, threadId, clock, SUMMARY_INTERVAL_MS } from '../core/activity.mjs';
 import { observeActivity } from './observe.mjs';
 import { send } from './codexhost.mjs';
 
@@ -53,7 +53,6 @@ export async function ensureActivity(root, { cli }) {
 }
 
 const excerpt = (text, size = 120) => text.length > size ? `${text.slice(0, size)}…` : text;
-const clock = value => value.slice(11, 16);
 
 function reminderText(index, exception) {
   const work = describeWork(index, exception.workId);
@@ -68,11 +67,11 @@ function reminderText(index, exception) {
   return `${work.title} \`${work.id}\`，${who}${ask}。全貌见 \`infohub activity ${work.id}\`。`;
 }
 
-function summaryText(index, workId, rounds, conclusions, result) {
+// 汇总只带执行者的新结论：在跑的轮主控自己派的、知道；别的负责会话的结果由交件和提醒送到，不在这里重复。
+function summaryText(index, workId, conclusions, result) {
   const work = describeWork(index, workId);
   const from = result.works.find(entry => entry.id === workId)?.from;
   const lines = [`${work.title} \`${work.id}\` ${from ? clock(from) : '未观察'}–${clock(result.observedAt)}`];
-  for (const round of rounds) lines.push(`当前轮 ${round.executor.title} #${round.turnNumber} 正在${round.progress ? `处理：${excerpt(round.progress)}` : '运行'}〔${round.link}〕`);
   for (const conclusion of conclusions) lines.push(`新增结论 ${conclusion.executor.title} #${conclusion.turnNumber}〔执行者报告〕“${excerpt(conclusion.text)}”〔${conclusion.link}〕`);
   lines.push(`全貌见 \`infohub activity ${work.id}\``);
   return lines.join('\n');
@@ -106,9 +105,10 @@ async function remind(cli, index, result) {
     }
   }
 
+  const owners = new Set(result.works.map(work => work.owner));
   for (const work of result.works) {
     if (!work.owner) continue;
-    const fresh = result.conclusions.filter(conclusion => conclusion.workId === work.id && conclusion.isNew);
+    const fresh = result.conclusions.filter(conclusion => conclusion.workId === work.id && conclusion.isNew && !owners.has(conclusion.link));
     if (!fresh.length) continue;
     const advance = () => {
       result.state.summary = { ...result.state.summary, [work.owner]: result.cursor[work.owner] ?? {} };
@@ -118,8 +118,7 @@ async function remind(cli, index, result) {
     // 窗口从循环启动时开始：第一次只记位置，不把刚发生的轮次当成新变化叫醒负责会话。
     if (!since) { advance(); continue; }
     if (nowMs - Date.parse(since) < SUMMARY_INTERVAL_MS) continue;
-    const rounds = result.rounds.filter(round => round.workId === work.id);
-    if (!await deliver(cli, work.owner, summaryText(index, work.id, rounds, fresh, result))) continue;
+    if (!await deliver(cli, work.owner, summaryText(index, work.id, fresh, result))) continue;
     advance();
   }
 }

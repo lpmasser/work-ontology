@@ -6,9 +6,17 @@ const STOPPED = ['completed', 'failed', 'interrupted'];
 const WATCH_HEADER = '[codexhost thread watch]';
 const STREAK_WINDOW = 5;
 const STREAK_INTERRUPTED = 4;
+// 「不用回」写在一行末尾才算：单独一行，或句末的「……，不用回我。」；正文中间提到这几个字不算。
+const NO_REPLY = /不用回[我复]?[。.!！)）」\s]*$/;
 
 export const threadLink = id => `codex://threads/${id}`;
 export const threadId = link => link.slice('codex://threads/'.length);
+// 给人和 Agent 看的时刻一律用本机时区，和会话里的时间对得上。
+const pad = value => String(value).padStart(2, '0');
+export const clock = (iso, seconds = false) => {
+  const date = new Date(iso);
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}${seconds ? `:${pad(date.getSeconds())}` : ''}`;
+};
 
 function isArchived(path) {
   return path.split('/').includes('archive');
@@ -51,7 +59,7 @@ export function readInitiator(turn) {
   const sender = lines.filter(line => line.startsWith('Sender: ')).at(-1)?.slice('Sender: '.length).trim();
   if (!sender || !OWNER_THREAD_PATTERN.test(sender)) return { kind: 'unknown' };
   const handover = lines.find(line => line.startsWith('交给：'))?.slice('交给：'.length).trim();
-  return { kind: 'task', sender, noReply: lines.includes('不用回'), handover: handover || null };
+  return { kind: 'task', sender, noReply: lines.some(line => NO_REPLY.test(line.trim())), handover: handover || null };
 }
 
 function conclusionOf(turn) {
@@ -68,14 +76,13 @@ function terminalAt(thread, isLatest, now) {
   return isLatest && thread.status !== 'running' && thread.updatedAt ? thread.updatedAt : now.toISOString();
 }
 
-// 接手人只要在交件后有过一轮提到执行者会话、并且那一轮已经结束，就算接住了：
+// 接手人起点之后的任何一轮（还在跑的也算），输入里（连同插话）提到执行者，就是接住了：
 // 执行者直接发来的任务、watch 通知、我们的提醒、别人转来的消息都算。
 function pickedUpBy(thread, executorId, floor) {
   if (!thread) return false;
   const mentioned = [threadLink(executorId), `thread://${executorId}`];
   return thread.turns.some(turn => turn.turnNumber > floor
-    && STOPPED.includes(turn.status)
-    && mentioned.some(link => (turn.messages.find(message => message.role === 'user')?.text ?? '').includes(link)));
+    && turn.messages.some(message => message.role === 'user' && mentioned.some(link => message.text.includes(link))));
 }
 
 // 接手人这一轮还在跑：提醒会撞上忙、按设计不打断它，等它结束再提醒。
@@ -112,6 +119,9 @@ export function judgeActivity(index, { threads, watches = [], now = new Date(), 
   const streaks = { ...(state.streaks ?? {}) };
   const reminded = [...(state.reminded ?? [])];
   const cursor = structuredClone(state.summary ?? {});
+  // 每个执行者会话由谁派过活：这些人说「继续，不用回」，这一轮的结果仍欠着他们。
+  const dispatchers = structuredClone(state.dispatchers ?? {});
+  const ownerIds = new Set(works.map(work => threadId(work.owner)));
   const exceptions = [], rounds = [], conclusions = [];
   const held = new Set();
 
@@ -122,7 +132,11 @@ export function judgeActivity(index, { threads, watches = [], now = new Date(), 
     const created = Date.parse(thread.createdAt ?? '');
     for (const turn of ordered) {
       const initiator = readInitiator(turn);
-      if (initiator.kind !== 'task' || initiator.noReply) continue;
+      if (initiator.kind !== 'task') continue;
+      // 「不用回」只免掉知会：负责会话之间的通知、旁人给执行者的消息。
+      // 派过活给这个执行者的人让它接着做，这一轮交出的仍是那件活（2026-11-21 重启后的「继续，不用回」漏掉了一次交件）。
+      const executor = !ownerIds.has(thread.threadId);
+      if (initiator.noReply && !(executor && dispatchers[thread.threadId]?.includes(initiator.sender))) continue;
       const key = `${thread.threadId}#${turn.turnNumber}`;
       const record = observed[key];
       // 只有新轮才建档：仍在运行的轮、上次观察之后新增的轮、上次观察之后新建的会话里的轮。
@@ -140,6 +154,9 @@ export function judgeActivity(index, { threads, watches = [], now = new Date(), 
       }
       const entry = record ?? (observed[key] = { workId: target.id, dispatcher: initiator.sender, floor: null, terminalAt: null, pickedUp: false });
       held.add(key);
+      if (executor && !dispatchers[thread.threadId]?.includes(initiator.sender)) {
+        dispatchers[thread.threadId] = [...(dispatchers[thread.threadId] ?? []), initiator.sender];
+      }
       const base = {
         workId: target.id, executor: { id: thread.threadId, title: thread.title },
         turnNumber: turn.turnNumber, link: threadLink(thread.threadId), dispatcher: initiator.sender
@@ -202,11 +219,14 @@ export function judgeActivity(index, { threads, watches = [], now = new Date(), 
         }
         continue;
       }
-      if (!entry.pickedUp) entry.pickedUp = pickedUpBy(threadById.get(threadId(recipient)), thread.threadId, entry.floor);
+      // 接手人已经让执行者开了后面的一轮，按它读过这一轮的结果算。排队等对方空下再发的消息也会这样开出下一轮，
+      // 那时可能其实没读：只撤提醒，不撤汇总，执行者的结论仍在十五分钟的汇总里送到。
+      const continuedBy = link => ordered.some(later => later.turnNumber > turn.turnNumber && readInitiator(later).sender === link);
+      if (!entry.pickedUp) entry.pickedUp = continuedBy(recipient) || pickedUpBy(threadById.get(threadId(recipient)), thread.threadId, entry.floor);
       if (!entry.pickedUp) {
-        // 升级之后派活人自己有一轮结束并提到执行者，就按他不再往下转撤项。
+        // 升级之后派活人自己提到执行者，或让执行者接着做了，就按他不再往下转撤项。
         const escalated = reminded.find(item => item.key === `escalate:${key}`);
-        if (escalated) entry.pickedUp = pickedUpBy(threadById.get(threadId(escalated.recipient)), thread.threadId, escalated.floor ?? entry.floor);
+        if (escalated) entry.pickedUp = continuedBy(escalated.recipient) || pickedUpBy(threadById.get(threadId(escalated.recipient)), thread.threadId, escalated.floor ?? entry.floor);
       }
       if (entry.pickedUp) continue;
       const busy = busyRound(threadById.get(threadId(recipient)));
@@ -287,7 +307,7 @@ export function judgeActivity(index, { threads, watches = [], now = new Date(), 
     rounds, conclusions, exceptions: open,
     settled: !rounds.length && !waiting && !open.some(exception => !exception.blocking),
     cursor, summaryAt: now.toISOString(),
-    state: { observedAt: now.toISOString(), turns: observed, streaks, reminded: kept, summary: state.summary ?? {}, summaryAt: state.summaryAt ?? {} }
+    state: { observedAt: now.toISOString(), turns: observed, streaks, reminded: kept, dispatchers, summary: state.summary ?? {}, summaryAt: state.summaryAt ?? {} }
   };
 }
 
@@ -298,7 +318,7 @@ export function situationLine(exception) {
 }
 
 function windowText(from, to, source) {
-  return `${from ? from.slice(11, 16) : '未观察'}–${to.slice(11, 16)}（观察 ${to}，${source}）`;
+  return `${from ? clock(from) : '未观察'}–${clock(to)}（观察 ${clock(to, true)}，${source}）`;
 }
 
 const excerpt = (text, size = 160) => text.length > size ? `${text.slice(0, size)}…` : text;
@@ -331,7 +351,7 @@ export function formatExceptions(result, source = '本次观察') {
 export function formatHealth({ error, lastSuccessAt }, now = new Date()) {
   const lines = [];
   if (error) lines.push(`最近错误 ${error}`);
-  if (lastSuccessAt) lines.push(`后台上次成功观察 ${lastSuccessAt}（${Math.round((now.getTime() - Date.parse(lastSuccessAt)) / 1000)} 秒前）`);
+  if (lastSuccessAt) lines.push(`后台上次成功观察 ${clock(lastSuccessAt, true)}（${Math.round((now.getTime() - Date.parse(lastSuccessAt)) / 1000)} 秒前）`);
   return lines.length ? lines.join('\n') : null;
 }
 
