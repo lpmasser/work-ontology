@@ -166,6 +166,13 @@ export function judgeActivity(index, { threads, watches = [], now = new Date(), 
       // 派活的人已把这件事交给接任：没指定接手人的交件交给现任，不再叫醒前任（2026-11-21 换主控后三条提醒发给了前任）。
       const derived = !watch?.notifyThreadId && !initiator.handover && target.owner && target.owner !== initiator.sender ? target.owner : named;
       const recipient = watchByTurn || !entry.recipient ? derived : entry.recipient;
+      // 交给的正是这个会话自己：这一轮是接手人在读交件，不是又一次交件
+      // （2026-11-22 各线发给总协调时写「交给：协调对象」，检查反过来提醒总协调接它自己的轮，一天八次）。
+      if (recipient && threadId(recipient) === thread.threadId) {
+        held.delete(key);
+        delete observed[key];
+        continue;
+      }
       // 定了接手人就记下来：之后不取 watch 的轮沿用同一个人。
       if (watchByTurn && !blocking) entry.recipient = derived;
       attributed.push({ turn, work: target, recipient, key, record: entry, blocking });

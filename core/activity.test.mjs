@@ -516,3 +516,15 @@ test('after a handover, a delivery the predecessor dispatched goes to the curren
   });
   assert.deepEqual(again.exceptions, []);
 });
+
+test('a message handing the work to the receiving owner itself is that owner reading the delivery, not a new delivery', () => {
+  // 线主控 C2 把进展发给总协调 C1，末尾写「交给：协调对象」；总协调这一轮读完就结束，不该被提醒接它自己的轮。
+  const coordination = work('work-coord', C1);
+  const line = work('work-line', C2);
+  const report = thread([turn(1361, { sender: C2, body: '已查明草稿链接卡住的根因\n交给：work-coord', reply: '记下了' })],
+    { id: threadId(C1), title: '总协调' });
+  const result = judge([coordination, line], [report, thread([], { id: threadId(C2), title: '面板化线' })],
+    { now: new Date('2026-11-22T06:40:00.000Z') });
+  assert.deepEqual(result.exceptions, []);
+  assert.deepEqual(Object.keys(result.state.turns ?? {}), []);
+});
