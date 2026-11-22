@@ -229,7 +229,10 @@ export function judgeActivity(index, { threads, watches = [], now = new Date(), 
         }
       }
       if (turn.status !== 'completed') {
-        if (!ordered.some(later => later.turnNumber > turn.turnNumber)) {
+        // 接手人读过这一轮（提醒送到就算）后可能决定换人、不再续做，不能一直挂着
+        // （2026-11-22 取消掉的执行者在总协调每次巡查里都被重新报一遍）。
+        if (!ordered.some(later => later.turnNumber > turn.turnNumber)
+          && !pickedUpBy(threadById.get(threadId(recipient)), thread.threadId, entry.floor)) {
           exceptions.push({
             key: `failure:${key}`, kind: 'failure', ...base, recipient, since: entry.terminalAt,
             detail: `第 ${turn.turnNumber} 轮 ${turn.status}${conclusion ? `：${conclusion}` : ''}`

@@ -528,3 +528,21 @@ test('a message handing the work to the receiving owner itself is that owner rea
   assert.deepEqual(result.exceptions, []);
   assert.deepEqual(Object.keys(result.state.turns ?? {}), []);
 });
+
+test('a failed round stops being reported once the recipient has read it, even if it chose not to continue', () => {
+  // 总协调收到“请决定续做或换人”后取消了执行者、改由别人接；这一轮不该在之后每次巡查里再报。
+  const coordination = work('work-coord', C1);
+  const failed = thread([turn(3, { sender: C1, body: '补属主两样', status: 'interrupted', reply: '做到一半' })]);
+  const read = { turnId: 'c1-5', turnNumber: 5, status: 'completed', messages: [
+    { role: 'user', text: `多线协调 \`work-coord\`，C2 线〔${threadLink(EXECUTOR)}〕第 3 轮 interrupted，请决定续做或换人。` },
+    { role: 'agent', phase: 'final', text: '已取消，改由主控自己接' }
+  ] };
+  const before = judge([coordination], [failed, thread([], { id: threadId(C1), title: '总协调', seenThrough: 4 })],
+    { now: new Date('2026-11-22T15:00:00.000Z') });
+  assert.deepEqual(before.exceptions.map(exception => exception.kind), ['failure']);
+  const after = judgeActivity(index(coordination), {
+    threads: [failed, thread([read], { id: threadId(C1), title: '总协调' })], now: new Date('2026-11-22T15:10:00.000Z'),
+    watches: [], state: { ...before.state, threads: { [EXECUTOR]: { seenThrough: 3 }, [threadId(C1)]: { seenThrough: 4 } } }
+  });
+  assert.deepEqual(after.exceptions, []);
+});
