@@ -51,9 +51,9 @@ test('a round belongs to the sender of its initiating input, and only a line end
     // 2026-11-21 总协调群发「可以开始替换」时把它写在句末，各线的回执又被汇总回总协调。
     turn(7, { sender: C3, body: '换完合进 develop 后在你的工作对象里记一句，不用回我。', reply: '收到' })
   ];
-  const first = judge([owner, other, work('work-d', D), work('work-c3', C3)], [thread(input, { id: threadId(D) })], { now: new Date('2026-11-21T06:41:00.000Z') });
+  const first = judge([owner, other, work('work-c3', C3)], [thread(input, { id: threadId(D) })], { now: new Date('2026-11-21T06:41:00.000Z') });
   assert.deepEqual(first.conclusions.map(entry => [entry.turnNumber, entry.workId]), [[1, 'work-a'], [2, 'work-b'], [3, 'work-a']]);
-  const later = judge([owner, other, work('work-d', D), work('work-c3', C3)], [thread(input, { id: threadId(D) })], { now: new Date('2026-11-21T06:46:00.000Z'), state: first.state });
+  const later = judge([owner, other, work('work-c3', C3)], [thread(input, { id: threadId(D) })], { now: new Date('2026-11-21T06:46:00.000Z'), state: first.state });
   const recipients = later.exceptions.filter(exception => exception.kind === 'deliver').map(exception => exception.recipient).sort();
   assert.deepEqual([...new Set(recipients)], [C1, C2]);
 });
@@ -545,4 +545,17 @@ test('a failed round stops being reported once the recipient has read it, even i
     watches: [], state: { ...before.state, threads: { [EXECUTOR]: { seenThrough: 3 }, [threadId(C1)]: { seenThrough: 4 } } }
   });
   assert.deepEqual(after.exceptions, []);
+});
+
+test('a reply turn of a responsible session is never a delivery, so a report between owners raises no reminder', () => {
+  // 2026-11-22：M4 给总协调发汇报，总协调回一句收到；检查把这一轮当成交件，五分钟后提醒 M4“请读该轮结论接着做”。
+  const coordination = work('work-coord', C1);
+  const line = work('work-m4', C2);
+  const ack = thread([turn(17, { sender: C2, body: '关系类型自查已完成，报告在 analysis/', reply: '已转总体设计师' })], { id: threadId(C1), title: '总协调' });
+  const result = judge([coordination, line], [ack, thread([], { id: threadId(C2), title: 'M4' })], { now: new Date('2026-11-22T16:00:00.000Z') });
+  assert.deepEqual(result.exceptions, []);
+  assert.deepEqual(result.conclusions, []);
+  // 还在跑的负责会话仍算“谁在跑”，后台检查不会因此提前退出。
+  const running = thread([turn(18, { sender: C2, body: '再看一眼', status: 'running' })], { id: threadId(C1), title: '总协调', status: 'running' });
+  assert.equal(judge([coordination, line], [running], { now: new Date('2026-11-22T16:00:00.000Z') }).rounds.length, 1);
 });

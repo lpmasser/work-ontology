@@ -105,10 +105,9 @@ async function remind(cli, index, result) {
     }
   }
 
-  const owners = new Set(result.works.map(work => work.owner));
   for (const work of result.works) {
     if (!work.owner) continue;
-    const fresh = result.conclusions.filter(conclusion => conclusion.workId === work.id && conclusion.isNew && !owners.has(conclusion.link));
+    const fresh = result.conclusions.filter(conclusion => conclusion.workId === work.id && conclusion.isNew);
     if (!fresh.length) continue;
     const advance = () => {
       result.state.summary = { ...result.state.summary, [work.owner]: result.cursor[work.owner] ?? {} };

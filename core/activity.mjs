@@ -62,6 +62,10 @@ export function readInitiator(turn) {
   return { kind: 'task', sender, noReply: lines.some(line => NO_REPLY.test(line.trim())), handover: handover || null };
 }
 
+function progressOf(turn) {
+  return turn.messages.filter(message => message.role === 'agent').at(-1)?.text?.trim() ?? null;
+}
+
 function conclusionOf(turn) {
   return turn.messages.filter(message => message.role === 'agent').at(-1)?.text?.trim() ?? null;
 }
@@ -133,8 +137,8 @@ export function judgeActivity(index, { threads, watches = [], now = new Date(), 
     for (const turn of ordered) {
       const initiator = readInitiator(turn);
       if (initiator.kind !== 'task') continue;
-      // 「不用回」只免掉知会：负责会话之间的通知、旁人给执行者的消息。
-      // 派过活给这个执行者的人让它接着做，这一轮交出的仍是那件活（2026-11-21 重启后的「继续，不用回」漏掉了一次交件）。
+      // 「不用回」只免掉旁人给执行者的知会；派过活给这个执行者的人让它接着做，
+      // 这一轮交出的仍是那件活（2026-11-21 重启后的「继续，不用回」漏掉了一次交件）。
       const executor = !ownerIds.has(thread.threadId);
       if (initiator.noReply && !(executor && dispatchers[thread.threadId]?.includes(initiator.sender))) continue;
       const key = `${thread.threadId}#${turn.turnNumber}`;
@@ -176,6 +180,13 @@ export function judgeActivity(index, { threads, watches = [], now = new Date(), 
       // 定了接手人就记下来：之后不取 watch 的轮沿用同一个人。
       if (watchByTurn && !blocking) entry.recipient = derived;
       attributed.push({ turn, work: target, recipient, key, record: entry, blocking });
+      // 负责会话之间的消息是汇报和知会，回的那一轮不是交件：要等回复的人自己挂 watch。
+      // 负责会话的轮只用来认提问框、连续中断和谁在跑（2026-11-22 线和总协调互相汇报，回执被当成交件，
+      // 一天提醒二十来次“请读该轮结论”，回的几乎都是“已读，没有要接着做的”）。
+      if (!executor) {
+        if (!STOPPED.includes(turn.status)) rounds.push({ ...base, status: turn.status, progress: progressOf(turn) });
+        continue;
+      }
 
       if (blocking) {
         entry.blocked = true;
@@ -190,7 +201,7 @@ export function judgeActivity(index, { threads, watches = [], now = new Date(), 
       if (!STOPPED.includes(turn.status)) {
         // 运行中的轮要留记录，它结束时才认得出是新交件。
         entry.running = true;
-        rounds.push({ ...base, status: turn.status, progress: turn.messages.filter(message => message.role === 'agent').at(-1)?.text?.trim() ?? null });
+        rounds.push({ ...base, status: turn.status, progress: progressOf(turn) });
         continue;
       }
       entry.running = false;
