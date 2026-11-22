@@ -545,6 +545,13 @@ test('a failed round stops being reported once the recipient has read it, even i
     watches: [], state: { ...before.state, threads: { [EXECUTOR]: { seenThrough: 3 }, [threadId(C1)]: { seenThrough: 4 } } }
   });
   assert.deepEqual(after.exceptions, []);
+  // 之后只取总协调新的轮，读提醒的那一轮已不在里面，也不再报（2026-11-23 同一条提醒了四次）。
+  const later = judgeActivity(index(coordination), {
+    threads: [failed, thread([turn(9, { sender: C2, body: '别的事', reply: '好' })], { id: threadId(C1), title: '总协调' })],
+    now: new Date('2026-11-22T23:10:00.000Z'), watches: [],
+    state: { ...after.state, threads: { [EXECUTOR]: { seenThrough: 3 }, [threadId(C1)]: { seenThrough: 8 } } }
+  });
+  assert.deepEqual(later.exceptions, []);
 });
 
 test('a reply turn of a responsible session is never a delivery, so a report between owners raises no reminder', () => {

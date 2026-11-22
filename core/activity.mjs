@@ -241,9 +241,10 @@ export function judgeActivity(index, { threads, watches = [], now = new Date(), 
       }
       if (turn.status !== 'completed') {
         // 接手人读过这一轮（提醒送到就算）后可能决定换人、不再续做，不能一直挂着
-        // （2026-11-22 取消掉的执行者在总协调每次巡查里都被重新报一遍）。
-        if (!ordered.some(later => later.turnNumber > turn.turnNumber)
-          && !pickedUpBy(threadById.get(threadId(recipient)), thread.threadId, entry.floor)) {
+        // （2026-11-22 取消掉的执行者在总协调每次巡查里都被重新报一遍）。读过就记下：
+        // 之后只取接手人新的轮，读的那一轮不在里面，不记下会被当成没读、再提醒一遍（2026-11-23 同一条提醒了四次）。
+        if (!entry.pickedUp) entry.pickedUp = pickedUpBy(threadById.get(threadId(recipient)), thread.threadId, entry.floor);
+        if (!entry.pickedUp && !ordered.some(later => later.turnNumber > turn.turnNumber)) {
           exceptions.push({
             key: `failure:${key}`, kind: 'failure', ...base, recipient, since: entry.terminalAt,
             detail: `第 ${turn.turnNumber} 轮 ${turn.status}${conclusion ? `：${conclusion}` : ''}`
