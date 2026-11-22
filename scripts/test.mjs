@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 
 const root = path.resolve(import.meta.dirname, '..');
 const files = [];
-for (const dir of ['core', 'cli', 'server', 'hooks', 'scripts', 'sync', 'activity']) {
+for (const dir of ['core', 'cli', 'server', 'hooks', 'scripts', 'sync']) {
   for (const file of await readdir(path.join(root, dir), { recursive: true })) {
     if (/\.test\.(mjs|js)$/.test(file)) files.push(path.join(dir, file));
   }

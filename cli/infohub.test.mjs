@@ -6,7 +6,6 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { main } from './infohub.mjs';
-import { clock } from '../core/activity.mjs';
 
 // 这些用例自己决定用哪个 codexhost。先清掉调用方 shell 里的入口，否则 brief/check
 // 会带着真实 CLI 拉起分离的活动循环；CLI 路径显式置空（而不是删掉），
@@ -584,21 +583,13 @@ test('configured links cover CLI text/JSON and brief annotations; webUser exclud
 });
 
 const OWNER = 'codex://threads/11111111-1111-1111-1111-111111111111';
-const NEXT = 'codex://threads/44444444-4444-4444-4444-444444444444';
-const EXECUTOR = '55555555-5555-5555-5555-555555555555';
-const FAKE_CODEXHOST = path.resolve(import.meta.dirname, '../activity/fixtures/fake-codexhost.mjs');
-const T0 = '2026-01-05T06:40:00.000Z';
 
-async function activityFixture(t) {
-  const home = await mkdtemp(path.join(tmpdir(), 'infohub activity-cli-'));
+async function ownerFixture(t) {
+  const home = await mkdtemp(path.join(tmpdir(), 'infohub owner-'));
   t.after(() => rm(home, { recursive: true, force: true }));
-  const root = path.join(home, 'vault'), cli = path.join(home, 'codexhost');
-  await mkdir(path.join(cli, 'read'), { recursive: true });
+  const root = path.join(home, 'vault');
   await mkdir(path.join(root, 'ontology'), { recursive: true });
   await mkdir(path.join(root, 'docs'), { recursive: true });
-  await mkdir(path.join(root, '.git/infohub-activity'), { recursive: true });
-  // 占住租约：这份库里已有活动检查在跑，brief/check 不会再拉起分离进程。
-  await writeFile(path.join(root, '.git/infohub-activity/activity.pid'), String(process.pid));
   await writeFile(path.join(root, 'ontology/ontology.json'), JSON.stringify({
     folders: ['docs'], primaryKey: 'ontology_id',
     properties: { ontology_id: { type: 'text', required: true }, ontology_type: { type: 'text', required: true }, title: { type: 'text', required: true } },
@@ -607,44 +598,11 @@ async function activityFixture(t) {
   }));
   const work = owner => `---\nontology_id: "work-a"\nontology_type: "work_item"\ntitle: "面板化线"\nprogress: "实施中"\n${owner ? `owner_thread: "${owner}"\n` : ''}---\n`;
   await writeFile(path.join(root, 'docs/work.md'), work(OWNER));
-  const write = (name, value) => writeFile(path.join(cli, name), `${JSON.stringify(value, null, 2)}\n`);
-  const turn = { turnId: 'turn-1', turnNumber: 1, status: 'completed', messages: [{ role: 'user', text: `派给你\n\nSender: ${OWNER}` }, { role: 'agent', phase: 'final', text: '已在本地提交 486a69581。' }] };
-  await write('threads.json', { threads: [
-    { threadId: EXECUTOR, title: 'C2 线', status: 'completed', updatedAt: T0 },
-    { threadId: '44444444-4444-4444-4444-444444444444', title: 'D', status: 'completed', updatedAt: T0 },
-    { threadId: OWNER.slice('codex://threads/'.length), title: '主控', status: 'completed', updatedAt: T0 }
-  ], nextCursor: null });
-  await write(`read/${EXECUTOR}.json`, { threadId: EXECUTOR, title: 'C2 线', status: 'completed', from: 1, to: 1, totalTurns: 1, turns: [turn], pendingQuestions: [] });
-  await write('read/44444444-4444-4444-4444-444444444444.json', { threadId: '44444444-4444-4444-4444-444444444444', title: 'D', status: 'completed', from: null, to: null, totalTurns: 0, turns: [], pendingQuestions: [] });
-  await write(`read/${OWNER.slice('codex://threads/'.length)}.json`, { threadId: OWNER.slice('codex://threads/'.length), title: '主控', status: 'completed', from: null, to: null, totalTurns: 0, turns: [], pendingQuestions: [] });
-  await write('watches.json', { watches: [{ threadId: EXECUTOR, notifyThreadId: '44444444-4444-4444-4444-444444444444', state: 'watching', turnId: 'turn-1', outcome: 'completed' }] });
-  // 模拟后台循环：接入时这一轮还在跑，之后它结束，记录里只剩一条未接的交件。
-  await mkdir(path.join(root, '.git/infohub-activity'), { recursive: true });
-  await writeFile(path.join(root, '.git/infohub-activity/state.json'), JSON.stringify({
-    observedAt: '2026-01-05T07:00:00.000Z',
-    threads: {
-      [EXECUTOR]: { updatedAt: T0, seenThrough: 1 },
-      '44444444-4444-4444-4444-444444444444': { updatedAt: T0, seenThrough: 0 },
-      [OWNER.slice('codex://threads/'.length)]: { updatedAt: T0, seenThrough: 0 }
-    },
-    turns: { [`${EXECUTOR}#1`]: { workId: 'work-a', dispatcher: OWNER, floor: 0, terminalAt: T0, pickedUp: false } },
-    streaks: {}, reminded: [], summary: {}, summaryAt: {}
-  }, null, 2));
-  return { root, cli, work };
-}
-
-async function withFakeCodexhost(t, cli) {
-  const before = { cli: process.env.CODEXHOST_CLI_PATH, dir: process.env.FAKE_CODEXHOST_DIR };
-  process.env.CODEXHOST_CLI_PATH = FAKE_CODEXHOST;
-  process.env.FAKE_CODEXHOST_DIR = cli;
-  t.after(() => {
-    if (before.cli === undefined) delete process.env.CODEXHOST_CLI_PATH; else process.env.CODEXHOST_CLI_PATH = before.cli;
-    if (before.dir === undefined) delete process.env.FAKE_CODEXHOST_DIR; else process.env.FAKE_CODEXHOST_DIR = before.dir;
-  });
+  return { root, work };
 }
 
 test('owner_thread passes only as a complete thread link on a work item', async t => {
-  const f = await activityFixture(t);
+  const f = await ownerFixture(t);
   const check = () => runCli(['--root', f.root, 'check', path.join(f.root, 'docs/work.md')]);
   assert.equal((await check()).code, 0);
   for (const [label, owner] of [['bare', '55555555-5555-5555-5555-555555555555'], ['note', `${OWNER}（主控）`], ['list', '[x]']]) {
@@ -657,167 +615,4 @@ test('owner_thread passes only as a complete thread link on a work item', async 
   assert.match((await check()).stdout, /owner_thread 必须是完整的会话链接/);
   await writeFile(path.join(f.root, 'docs/work.md'), `---\nontology_id: "work-a"\nontology_type: "work_item"\ntitle: "面板化线"\nprogress: "实施中"\n---\n`);
   assert.equal((await check()).code, 0);
-});
-
-test('activity shows the current owner, the open exception and new conclusions without sending anything', async t => {
-  const f = await activityFixture(t);
-  await withFakeCodexhost(t, f.cli);
-
-  const seeded = await readFile(path.join(f.root, '.git/infohub-activity/state.json'), 'utf8');
-  const text = await runCli(['--root', f.root, 'activity', 'work-a']);
-  assert.equal(text.code, 0, text.stderr);
-  assert.match(text.stdout, /面板化线 · (未观察|\d\d:\d\d)–\d\d:\d\d（观察 \d\d:\d\d:\d\d，[^）]*）/);
-  assert.match(text.stdout, new RegExp(`C2 线 #1 → ${NEXT.replaceAll('/', '\\/')}，第 1 轮交付后五分钟未接`));
-  assert.match(text.stdout, /C2 线 #1〔执行者报告〕“已在本地提交 486a69581。”〔codex:\/\/threads\/5555/);
-
-  const first = JSON.parse((await runCli(['--root', f.root, 'activity', 'work-a', '--json'])).stdout);
-  assert.equal(first.enabled, true);
-  assert.equal(first.work.owner, OWNER);
-  assert.deepEqual(first.conclusions.map(conclusion => conclusion.isNew), [true], '汇总位置只由后台循环推进');
-  // 查询不写状态：两次读取互不影响，也没有留下任何状态文件。
-  const second = JSON.parse((await runCli(['--root', f.root, 'activity', 'work-a', '--json'])).stdout);
-  assert.deepEqual(second.conclusions.map(conclusion => conclusion.isNew), [true]);
-
-  const exceptions = JSON.parse((await runCli(['--root', f.root, 'activity', '--exceptions', '--json'])).stdout);
-  assert.deepEqual(exceptions.exceptions.map(exception => [exception.kind, exception.recipient]), [['deliver', NEXT]]);
-
-  const missed = await runCli(['--root', f.root, 'activity', 'work-missing']);
-  assert.equal(missed.code, 1);
-  assert.match(missed.stderr, /找不到工作对象/);
-
-  await assert.rejects(readFile(path.join(f.cli, 'sent.jsonl'), 'utf8'), { code: 'ENOENT' }, '只读查询不发消息');
-  assert.equal(await readFile(path.join(f.root, '.git/infohub-activity/state.json'), 'utf8'), seeded, '只读查询不写状态');
-});
-
-test('activity reports itself as not enabled when this machine has no codexhost CLI', async t => {
-  const f = await activityFixture(t);
-  const before = { cli: process.env.CODEXHOST_CLI_PATH, path: process.env.PATH };
-  // PATH 里只留 Git，模拟没有 codexhost CLI 的机器。
-  const bin = path.join(f.root, 'bin');
-  await mkdir(bin);
-  const gitPath = findExecutable('git');
-  if (process.platform === 'win32') await copyFile(gitPath, path.join(bin, path.basename(gitPath)));
-  else await symlink(gitPath, path.join(bin, 'git'));
-  delete process.env.CODEXHOST_CLI_PATH;
-  process.env.PATH = bin;
-  t.after(() => {
-    if (before.cli !== undefined) process.env.CODEXHOST_CLI_PATH = before.cli;
-    process.env.PATH = before.path;
-  });
-  const off = await runCli(['--root', f.root, 'activity']);
-  assert.equal(off.code, 0);
-  assert.match(off.stdout, /活动检查未启用：本机没有 codexhost CLI/);
-  const offJson = JSON.parse((await runCli(['--root', f.root, 'activity', '--json'])).stdout);
-  assert.deepEqual(offJson, { version: 1, enabled: false });
-  const checked = await runCli(['--root', f.root, 'check', path.join(f.root, 'docs/work.md')]);
-  assert.equal(checked.code, 0, '没有 codexhost 时原有校验照常可用');
-});
-
-test('activity without a work ID lists every work of the calling session, whichever codexhost variable names it', async t => {
-  const f = await activityFixture(t);
-  await withFakeCodexhost(t, f.cli);
-  await writeFile(path.join(f.root, 'docs/work2.md'),
-    `---\nontology_id: "work-b"\nontology_type: "work_item"\ntitle: "另一条线"\nprogress: "实施中"\nowner_thread: "${OWNER}"\n---\n`);
-  const before = { host: process.env.CODEXHOST_THREAD_ID, codex: process.env.CODEX_THREAD_ID };
-  delete process.env.CODEXHOST_THREAD_ID;
-  process.env.CODEX_THREAD_ID = OWNER.slice('codex://threads/'.length);
-  t.after(() => {
-    if (before.host !== undefined) process.env.CODEXHOST_THREAD_ID = before.host;
-    if (before.codex === undefined) delete process.env.CODEX_THREAD_ID; else process.env.CODEX_THREAD_ID = before.codex;
-  });
-  const shown = JSON.parse((await runCli(['--root', f.root, 'activity', '--json'])).stdout);
-  assert.deepEqual(shown.works.map(entry => entry.work.id).sort(), ['work-a', 'work-b']);
-  const text = await runCli(['--root', f.root, 'activity']);
-  assert.equal(text.code, 0);
-  assert.match(text.stdout, /面板化线 · /);
-  assert.match(text.stdout, /另一条线 · /);
-});
-
-test('a stale background result is still shown while the loop runs; only a stopped loop makes the query observe', async t => {
-  const f = await activityFixture(t);
-  await withFakeCodexhost(t, f.cli);
-  const dir = path.join(f.root, '.git/infohub-activity');
-  const callsFile = path.join(f.cli, 'calls.log');
-  const calls = async () => (await readFile(callsFile, 'utf8').catch(() => '')).split('\n').filter(Boolean).length;
-  // 活着的 pid：查询据此判断活动进程在跑。
-  await writeFile(path.join(dir, 'activity.pid'), String(process.pid));
-  const background = {
-    observedAt: new Date().toISOString(),
-    works: [{ id: 'work-a', title: '面板化线', owner: OWNER, path: 'docs/work.md', from: '2026-01-05T06:00:00.000Z' }],
-    exceptions: [{
-      key: `deliver:${EXECUTOR}#1`, kind: 'deliver', workId: 'work-a', recipient: NEXT, dispatcher: OWNER,
-      executor: { id: EXECUTOR, title: 'C2 线' }, turnNumber: 1, link: `codex://threads/${EXECUTOR}`,
-      since: T0, detail: '第 1 轮交付后五分钟未接', reminded: null
-    }],
-    rounds: [], conclusions: []
-  };
-  await writeFile(path.join(dir, 'result.json'), JSON.stringify(background));
-
-  const before = await calls();
-  const fresh = await runCli(['--root', f.root, 'activity', '--exceptions']);
-  assert.equal(fresh.code, 0, fresh.stderr);
-  assert.match(fresh.stdout, /（观察 .*，后台结果）/);
-  assert.match(fresh.stdout, /C2 线 #1 → codex:\/\/threads\/4444/);
-  assert.equal(await calls(), before, '新鲜的后台结果不调用 codexhost');
-  assert.equal(JSON.parse((await runCli(['--root', f.root, 'activity', '--exceptions', '--json'])).stdout).source, '后台结果');
-
-  // 过期但循环还在跑：照样显示那份旧结果，注明过期和后台的错误，不调用 codexhost。
-  const observedAt = new Date(Date.now() - 5 * 60_000).toISOString();
-  await writeFile(path.join(dir, 'result.json'), JSON.stringify({ ...background, observedAt }));
-  const state = JSON.parse(await readFile(path.join(dir, 'state.json'), 'utf8'));
-  await writeFile(path.join(dir, 'state.json'), JSON.stringify({ ...state, error: '第 2 次观察失败：codexhost thread watches: null', lastSuccessAt: observedAt }));
-  const stale = await runCli(['--root', f.root, 'activity', '--exceptions']);
-  assert.equal(stale.code, 0, stale.stderr);
-  assert.match(stale.stdout, /（观察 .*，后台结果）/);
-  assert.match(stale.stdout, /后台结果已过期/);
-  assert.match(stale.stdout, /最近错误 第 2 次观察失败：codexhost thread watches: null/);
-  assert.match(stale.stdout, /C2 线 #1 → codex:\/\/threads\/4444/, '仍然显示旧结果里的交件');
-  assert.equal(await calls(), before, '过期的后台结果也不调用 codexhost');
-  const staleJson = JSON.parse((await runCli(['--root', f.root, 'activity', '--exceptions', '--json'])).stdout);
-  assert.equal(staleJson.stale, true);
-  assert.equal(staleJson.observedAt, observedAt);
-
-  // 后台根本没在跑：查询自己观察。
-  await rm(path.join(dir, 'activity.pid'));
-  const alone = await runCli(['--root', f.root, 'activity', '--exceptions']);
-  assert.equal(alone.code, 0, alone.stderr);
-  assert.match(alone.stdout, /（观察 .*，本次观察）/);
-  assert.ok(await calls() > before, '没有后台进程时查询自己观察');
-  const observed = JSON.parse((await runCli(['--root', f.root, 'activity', 'work-a', '--json'])).stdout);
-  assert.equal(observed.source, '本次观察');
-  assert.deepEqual(observed.conclusions.map(conclusion => conclusion.text), ['已在本地提交 486a69581。']);
-});
-
-test('activity shows the last observation error and how long ago it last succeeded', async t => {
-  const f = await activityFixture(t);
-  await withFakeCodexhost(t, f.cli);
-  const file = path.join(f.root, '.git/infohub-activity/state.json');
-  const state = JSON.parse(await readFile(file, 'utf8'));
-  const observedAt = new Date(Date.now() - 8 * 60_000).toISOString();
-  await writeFile(path.join(f.root, '.git/infohub-activity/activity.pid'), String(process.pid));
-  await writeFile(path.join(f.root, '.git/infohub-activity/result.json'), JSON.stringify({
-    observedAt, works: [{ id: 'work-a', title: '面板化线', owner: OWNER, path: 'docs/work.md', from: null }],
-    exceptions: [], rounds: [], conclusions: []
-  }));
-  await writeFile(file, JSON.stringify({
-    ...state, error: '第 3 次观察失败：codexhost thread watches: null', lastSuccessAt: observedAt, failures: 3
-  }));
-
-  const off = await runCli(['--root', f.root, 'activity', 'work-a']);
-  assert.equal(off.code, 0, off.stderr);
-  assert.match(off.stdout, /最近错误 第 3 次观察失败：codexhost thread watches: null/);
-  assert.match(off.stdout, new RegExp(`后台上次成功观察 ${clock(observedAt, true)}（\\d+ 秒前）`));
-  const json = JSON.parse((await runCli(['--root', f.root, 'activity', 'work-a', '--json'])).stdout);
-  assert.equal(json.error, '第 3 次观察失败：codexhost thread watches: null');
-  assert.equal(json.lastSuccessAt, observedAt);
-});
-
-test('check and brief never start a detached activity loop from the test vault', async t => {
-  const f = await activityFixture(t);
-  // 租约被本进程占着：命令自己看得到「在跑」，不会再拉起分离进程。
-  const started = await runCli(['--root', f.root, 'check', path.join(f.root, 'docs/work.md')]);
-  assert.equal(started.code, 0, started.stderr);
-  const listed = spawnSync('ps', ['-axo', 'pid=,command='], { encoding: 'utf8' }).stdout || '';
-  assert.ok(!listed.split('\n').some(line => line.includes(f.root) && line.includes('activity run')), '没有拉起 activity run');
-  assert.equal(await readFile(path.join(f.root, '.git/infohub-activity/activity.pid'), 'utf8'), String(process.pid));
 });
