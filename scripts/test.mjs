@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 
 const root = path.resolve(import.meta.dirname, '..');
 const files = [];
-for (const dir of ['core', 'cli', 'server', 'hooks', 'scripts', 'sync']) {
+for (const dir of ['core', 'cli', 'server', 'hooks', 'scripts', 'sync', 'summary']) {
   for (const file of await readdir(path.join(root, dir), { recursive: true })) {
     if (/\.test\.(mjs|js)$/.test(file)) files.push(path.join(dir, file));
   }
@@ -18,9 +18,9 @@ try {
     cwd: root, stdio: 'inherit',
     env: {
       ...process.env, HOME: home, USERPROFILE: home, GIT_CONFIG_GLOBAL: path.join(home, '.gitconfig'),
-      // 测试不接本机真实的 codexhost 会话身份，也不拉起真实活动循环：
+      // 测试不接本机真实的 codexhost 会话身份，也不拉起真实的工作汇总：
       // CLI 入口显式置空，解析时连 PATH 都不再看。
-      CODEXHOST_CLI_PATH: '', CODEXHOST_THREAD_ID: '', INFOHUB_ACTIVITY_CLI: '',
+      CODEXHOST_CLI_PATH: '', CODEXHOST_THREAD_ID: '', INFOHUB_SUMMARY_CLI: '',
     },
   });
   if (result.error) throw result.error;

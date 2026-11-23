@@ -6,6 +6,8 @@ import { configureRuntime, readConfig } from '../core/runtime.mjs';
 import { loadVault } from '../core/vault.mjs';
 import { buildOverview } from '../core/overview.mjs';
 import { isUnfinishedWork, needsUserDecision } from '../core/engine.js';
+import { findSummaryCli } from '../summary/codexhost.mjs';
+import { ensureSummary, runSummary, setSubscription } from '../summary/loop.mjs';
 import { resolveProject, filterObjects, queryFind, queryGet, queryAround } from '../core/query.mjs';
 import { checkPaths, selectIssues, annotationIssuesOutsideModel } from '../core/validation.mjs';
 import { annotationSummary } from '../core/annotations.mjs';
@@ -22,6 +24,8 @@ const USAGE = `用法: infohub <命令> [参数...]
   around <ID或路径>... [--relation <关系>] [--direction outgoing|incoming] 查询关联对象
   get <ID或路径>                                             获取对象路径与全部属性
   check [路径...]                                           校验对象与模型（有错误退出码 1）
+  subscribe <工作 ID>                                       给这件工作现在的负责会话恢复订阅工作汇总
+  unsubscribe <工作 ID>                                     退订工作汇总（工作暂停时用；换了负责会话会自动给新人订上）
   sync run|status|logs                               前台同步或查看状态（brief/check 按需启动；服务器由 Docker 托管）
   help                                                     显示帮助信息
 
@@ -177,6 +181,18 @@ async function handleGet(vault, target, json, config) {
   }
 }
 
+async function handleSubscription(root, index, id, subscribed) {
+  const object = id && index.objects.get(id);
+  if (!object || object.type !== 'work_item') throw new Error(`找不到工作对象：${id ?? ''}`);
+  const owner = object.frontmatter.owner_thread;
+  if (!owner) throw new Error(`${id} 没有负责会话（owner_thread），没有订阅可改`);
+  await setSubscription(root, { id, owner }, subscribed);
+  console.log(subscribed
+    ? `已订阅：${object.title} 的工作汇总发给 ${owner}`
+    : `已退订：${object.title} 不再给 ${owner} 发工作汇总；换了负责会话会自动给新人订上`);
+  return 0;
+}
+
 async function handleCheck(vault, paths, root) {
   const targets = await checkPaths(root, paths, vault.model);
   const issues = [...(paths.length ? selectIssues(vault.index.issues, targets) : vault.index.issues), ...await annotationIssuesOutsideModel(root, targets, vault.model)];
@@ -206,12 +222,16 @@ export async function main(argv = process.argv.slice(2)) {
   if (config.webUrl) config.webUrl = normalizeWebUrl(config.webUrl);
   if (!cliRoot && !config?.root) throw new Error('未指定 InfoHub 根目录；请使用 --root <dir> 或运行 scripts/install.mjs。');
   const root = path.resolve(cliRoot || config.root);
+  // 必须比收窄 PATH 早：汇总子进程以后要用这个绝对入口调用本机 codexhost。
+  const summaryCli = findSummaryCli();
   await configureRuntime(config);
   if (command === 'sync') { await syncCommand(root, args.slice(1)); return 0; }
   if (command === 'brief' || command === 'check') {
     const { reason } = await ensureOnDemand(root, { refresh: command === 'brief' });
     if (reason) console.error(`InfoHub 同步：${reason}`);
+    await ensureSummary(root, { cli: summaryCli });
   }
+  if (command === 'summary' && args[1] === 'run') { await runSummary(root); return 0; }
   const vault = await loadVault(root);
 
   switch (command) {
@@ -233,6 +253,9 @@ export async function main(argv = process.argv.slice(2)) {
       return 0;
     case 'check':
       return await handleCheck(vault, args.slice(1), root);
+    case 'subscribe':
+    case 'unsubscribe':
+      return await handleSubscription(root, vault.index, args[1], command === 'subscribe');
     default:
       console.error(`未知命令: ${command}\n\n${USAGE}`);
       return 1;

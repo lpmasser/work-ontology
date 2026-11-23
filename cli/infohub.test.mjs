@@ -616,3 +616,17 @@ test('owner_thread passes only as a complete thread link on a work item', async 
   await writeFile(path.join(f.root, 'docs/work.md'), `---\nontology_id: "work-a"\nontology_type: "work_item"\ntitle: "面板化线"\nprogress: "实施中"\n---\n`);
   assert.equal((await check()).code, 0);
 });
+
+test('unsubscribe opts the current owner out of the work summary and subscribe restores it', async t => {
+  const f = await ownerFixture(t);
+  const optOut = async () => JSON.parse(await readFile(path.join(f.root, '.git/infohub-summary/optout.json'), 'utf8'));
+  const off = await runCli(['--root', f.root, 'unsubscribe', 'work-a']);
+  assert.equal(off.code, 0, off.stderr);
+  assert.deepEqual(await optOut(), { 'work-a': OWNER });
+  const on = await runCli(['--root', f.root, 'subscribe', 'work-a']);
+  assert.equal(on.code, 0, on.stderr);
+  assert.deepEqual(await optOut(), {});
+  await writeFile(path.join(f.root, 'docs/work.md'), f.work(null));
+  const none = await runCli(['--root', f.root, 'unsubscribe', 'work-a']);
+  assert.notEqual(none.code, 0);
+});
