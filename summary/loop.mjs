@@ -4,7 +4,7 @@ import path from 'node:path';
 import { loadVault } from '../core/vault.mjs';
 import { currentRuntime } from '../core/runtime.mjs';
 import { json, save, lease, alive, iso } from '../sync/git.mjs';
-import { subscriptions, plan, digest, fingerprint, summaryText, threadId } from '../core/summary.mjs';
+import { subscriptions, plan, digest, fingerprint, worthSending, summaryText, threadId } from '../core/summary.mjs';
 import { listChildren, watchedIds, send } from './codexhost.mjs';
 
 export const TICK_MS = 60_000;
@@ -53,37 +53,39 @@ export async function ensureSummary(root, { cli }) {
   } finally { await log.close(); }
 }
 
-// 看一次：新订上的（含换了负责会话的）马上发一份，其余每 15 分钟看一次、有变化才发。
-// 这台机器第一次跑时只记下现状、不发，免得把所有进行中工作的负责会话都叫醒一遍。
+// 看一次：新订上的（含换了负责会话的）马上告诉它一次；其余每个负责会话每 15 分钟看一次，
+// 有要它处理的变化才发。这台机器第一次跑时只记下现状、不发，免得把所有负责会话都叫醒一遍。
 export async function tick(root, cli, state, now) {
   const vault = await loadVault(root);
-  const works = subscriptions(vault.index, await readOptOut(root));
-  const bootstrap = !state.entries;
-  const { entries, due } = plan(works, state.entries ?? {}, now);
+  const subscribed = subscriptions(vault.index, await readOptOut(root));
+  const bootstrap = !state.works;
+  const { works, owners, due } = plan(subscribed, state, now);
   let active = false, pending = false;
   if (due.length) {
     const watched = await watchedIds(cli);
-    for (const { work, entry, first } of due) {
+    for (const group of due) {
       let facts;
       try {
-        const lists = await Promise.all([entry.owner, ...entry.previous].map(owner => listChildren(cli, threadId(owner))));
-        facts = digest(lists.flat(), watched, entry.checkedAt);
+        const lists = await Promise.all([group.owner, ...group.previous].map(owner => listChildren(cli, threadId(owner))));
+        facts = digest(lists.flat(), watched, group.since);
       } catch (error) {
-        console.log(`${iso()} ${work.id} 这次没看成：${error.message}`);
-        entry.checkedAt = now.toISOString();
+        console.log(`${iso()} ${group.owner} 这次没看成：${error.message}`);
+        owners[group.owner] = { ...owners[group.owner], checkedAt: now.toISOString() };
         continue;
       }
-      if (facts.running.length) active = true;
-      const print = fingerprint(work, facts);
-      if (!bootstrap && (first || print !== entry.fingerprint)) {
+      if (facts.running) active = true;
+      const print = fingerprint(group.works, facts);
+      const changed = print !== owners[group.owner]?.fingerprint && worthSending(facts);
+      if (!bootstrap && (group.fresh.length || changed)) {
         // 对方正忙：不插话，下一分钟再试。
-        if (!await send(cli, threadId(work.owner), summaryText(work, facts, { first }))) { pending = true; continue; }
+        const text = summaryText(group.owner, group.works, facts, { fresh: group.fresh });
+        if (!await send(cli, threadId(group.owner), text)) { pending = true; continue; }
       }
-      entry.checkedAt = now.toISOString();
-      entry.fingerprint = print;
+      owners[group.owner] = { checkedAt: now.toISOString(), fingerprint: print };
+      for (const work of group.fresh) works[work.id].welcomed = true;
     }
   }
-  return { entries, pending, lastActiveAt: active || !state.lastActiveAt ? now.toISOString() : state.lastActiveAt };
+  return { works, owners, pending, lastActiveAt: active || !state.lastActiveAt ? now.toISOString() : state.lastActiveAt };
 }
 
 async function holdsLease(file) {
